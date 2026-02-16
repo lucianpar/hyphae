@@ -239,15 +239,30 @@ jobs:
           SIGN_FLAG=""
           if [ -n "$DEVELOPER_ID_INSTALLER" ]; then SIGN_FLAG="--sign \"$DEVELOPER_ID_INSTALLER\""; fi
           
-          pkgbuild --identifier "${{ env.BUNDLE_ID }}.au.pkg" --version $VERSION --component "${{ env.AU_PATH }}" --install-location "/Library/Audio/Plug-Ins/Components" $SIGN_FLAG "packaging/${{ env.PRODUCT_NAME }}.au.pkg"
-          pkgbuild --identifier "${{ env.BUNDLE_ID }}.vst3.pkg" --version $VERSION --component "${{ env.VST3_PATH }}" --install-location "/Library/Audio/Plug-Ins/VST3" $SIGN_FLAG "packaging/${{ env.PRODUCT_NAME }}.vst3.pkg"
-          # pkgbuild --identifier "${{ env.BUNDLE_ID }}.clap.pkg" --version $VERSION --component "${{ env.CLAP_PATH }}" --install-location "/Library/Audio/Plug-Ins/CLAP" $SIGN_FLAG "packaging/${{ env.PRODUCT_NAME }}.clap.pkg"
-
-          # Standalone is special, needs a boolean to always install in /Applications
-          pkgbuild --analyze --root "$(dirname "${{ env.STANDALONE_PATH }}")" standalone.plist
+          # Create temporary directories for packaging with --root
+          mkdir -p /tmp/pkg_root/AU
+          mkdir -p /tmp/pkg_root/VST3
+          mkdir -p /tmp/pkg_root/Standalone
+          
+          # Copy plugins to temporary directories
+          cp -R "${{ env.AU_PATH }}" /tmp/pkg_root/AU/
+          cp -R "${{ env.VST3_PATH }}" /tmp/pkg_root/VST3/
+          cp -R "${{ env.STANDALONE_PATH }}" /tmp/pkg_root/Standalone/
+          
+          # Build packages using --root to properly set installation locations
+          pkgbuild --identifier "${{ env.BUNDLE_ID }}.au.pkg" --version $VERSION --root /tmp/pkg_root/AU --install-location "/Library/Audio/Plug-Ins/Components" $SIGN_FLAG "packaging/${{ env.PRODUCT_NAME }}.au.pkg"
+          pkgbuild --identifier "${{ env.BUNDLE_ID }}.vst3.pkg" --version $VERSION --root /tmp/pkg_root/VST3 --install-location "/Library/Audio/Plug-Ins/VST3" $SIGN_FLAG "packaging/${{ env.PRODUCT_NAME }}.vst3.pkg"
+          # pkgbuild --identifier "${{ env.BUNDLE_ID }}.clap.pkg" --version $VERSION --root /tmp/pkg_root/CLAP --install-location "/Library/Audio/Plug-Ins/CLAP" $SIGN_FLAG "packaging/${{ env.PRODUCT_NAME }}.clap.pkg"
+          
+          # Standalone: analyze and set BundleIsRelocatable to NO
+          pkgbuild --analyze --root /tmp/pkg_root/Standalone standalone.plist
           plutil -replace BundleIsRelocatable -bool NO standalone.plist
-          pkgbuild --identifier "${{ env.BUNDLE_ID }}.app.pkg" --version $VERSION --root "$(dirname "${{ env.STANDALONE_PATH }}")" --component-plist standalone.plist --install-location "/Applications" $SIGN_FLAG "packaging/${{ env.PRODUCT_NAME }}.app.pkg"
+          pkgbuild --identifier "${{ env.BUNDLE_ID }}.app.pkg" --version $VERSION --root /tmp/pkg_root/Standalone --component-plist standalone.plist --install-location "/Applications" $SIGN_FLAG "packaging/${{ env.PRODUCT_NAME }}.app.pkg"
 
+          # Create resources directory for productbuild
+          mkdir -p packaging/resources
+          cp LICENSE packaging/resources/
+          
           cd packaging
           envsubst < distribution.xml.template > distribution.xml
           productbuild --resources ./resources --distribution distribution.xml $SIGN_FLAG "${{ env.ARTIFACT_NAME }}.pkg"
