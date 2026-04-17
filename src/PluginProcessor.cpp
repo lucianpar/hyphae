@@ -315,8 +315,12 @@ void AudioPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPer
     writeGain.reset (currentSampleRate, 0.03);
     dryWetMix.reset (currentSampleRate, 0.03);
     outputGain.reset (currentSampleRate, 0.03);
+    sporeSideMix.reset (currentSampleRate, 0.03);
+    bedMidMix.reset (currentSampleRate, 0.03);
     delayBuffer.prepare (currentSampleRate, delayCapacitySamples);
     wetBuffer.setSize (2, preparedBlockSize, false, false, true);
+    sporeBuffer.setSize (2, preparedBlockSize, false, false, true);
+    bedBuffer.setSize (2, preparedBlockSize, false, false, true);
     resetDelayState();
     resetGrainState();
     resetMyceliumState();
@@ -394,9 +398,15 @@ void AudioPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
 
     const auto outputTrimDb = getFloatParameterValue (outputTrimDbParameter, 0.0f);
     outputGain.setTargetValue (juce::Decibels::decibelsToGain (outputTrimDb));
+    const auto spread = juce::jlimit (0.0f, 1.0f, getFloatParameterValue (spreadParameter, 0.6f));
+    const auto conduction = juce::jlimit (0.0f, 1.0f, getFloatParameterValue (conductionParameter, 0.4f));
+    sporeSideMix.setTargetValue (juce::jlimit (0.0f, 1.0f, 0.08f + (spread * 0.32f)));
+    bedMidMix.setTargetValue (juce::jlimit (0.0f, 1.0f, 0.10f + (conduction * 0.28f)));
 
     spawnGrainsForBlock (numSamples);
     wetBuffer.clear();
+    sporeBuffer.clear();
+    bedBuffer.clear();
 
     for (int sampleIndex = 0; sampleIndex < numSamples; ++sampleIndex)
     {
@@ -413,8 +423,9 @@ void AudioPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         lastWriteGain.store (smoothedWriteGain, std::memory_order_relaxed);
     }
 
-    renderWetGrains (wetBuffer, numSamples);
-    renderConductionBed (wetBuffer, numSamples);
+    renderWetGrains (wetBuffer, sporeBuffer, numSamples);
+    renderConductionBed (wetBuffer, bedBuffer, numSamples);
+    applyStereoShaping (wetBuffer, sporeBuffer, bedBuffer, numSamples);
 
     auto* wetLeft = wetBuffer.getWritePointer (0);
     auto* wetRight = wetBuffer.getWritePointer (1);
@@ -536,6 +547,8 @@ void AudioPluginAudioProcessor::resetGrainState() noexcept
 
     dryWetMix.setCurrentAndTargetValue (getFloatParameterValue (dryWetParameter, 0.5f));
     outputGain.setCurrentAndTargetValue (juce::Decibels::decibelsToGain (getFloatParameterValue (outputTrimDbParameter, 0.0f)));
+    sporeSideMix.setCurrentAndTargetValue (0.08f + (juce::jlimit (0.0f, 1.0f, getFloatParameterValue (spreadParameter, 0.6f)) * 0.32f));
+    bedMidMix.setCurrentAndTargetValue (0.10f + (juce::jlimit (0.0f, 1.0f, getFloatParameterValue (conductionParameter, 0.4f)) * 0.28f));
     samplesUntilNextSpawn = 0.0;
     lastActiveGrainCount.store (0, std::memory_order_relaxed);
 }
@@ -651,10 +664,14 @@ bool AudioPluginAudioProcessor::spawnGrainVoice() noexcept
     return true;
 }
 
-void AudioPluginAudioProcessor::renderWetGrains (juce::AudioBuffer<float>& destinationBuffer, int numSamples) noexcept
+void AudioPluginAudioProcessor::renderWetGrains (juce::AudioBuffer<float>& destinationBuffer,
+                                                 juce::AudioBuffer<float>& sporeDestinationBuffer,
+                                                 int numSamples) noexcept
 {
     auto* wetLeft = destinationBuffer.getWritePointer (0);
     auto* wetRight = destinationBuffer.getWritePointer (1);
+    auto* sporeLeft = sporeDestinationBuffer.getWritePointer (0);
+    auto* sporeRight = sporeDestinationBuffer.getWritePointer (1);
 
     for (auto& voice : grainVoices)
     {
@@ -674,8 +691,12 @@ void AudioPluginAudioProcessor::renderWetGrains (juce::AudioBuffer<float>& desti
             const auto sourceSample = delayBuffer.readDelaySamples (voice.delaySamples + voice.readOffsetSamples);
             const auto sample = sanitizeSample (sourceSample * window * voice.gain);
 
-            wetLeft[sampleIndex] = sanitizeSample (wetLeft[sampleIndex] + (sample * voice.leftGain));
-            wetRight[sampleIndex] = sanitizeSample (wetRight[sampleIndex] + (sample * voice.rightGain));
+            const auto leftSample = sample * voice.leftGain;
+            const auto rightSample = sample * voice.rightGain;
+            wetLeft[sampleIndex] = sanitizeSample (wetLeft[sampleIndex] + leftSample);
+            wetRight[sampleIndex] = sanitizeSample (wetRight[sampleIndex] + rightSample);
+            sporeLeft[sampleIndex] = sanitizeSample (sporeLeft[sampleIndex] + leftSample);
+            sporeRight[sampleIndex] = sanitizeSample (sporeRight[sampleIndex] + rightSample);
 
             voice.readOffsetSamples += voice.readIncrement;
             --voice.samplesRemaining;
@@ -690,6 +711,8 @@ void AudioPluginAudioProcessor::renderWetGrains (juce::AudioBuffer<float>& desti
     {
         wetLeft[sampleIndex] = sanitizeSample (wetLeft[sampleIndex] * normalization);
         wetRight[sampleIndex] = sanitizeSample (wetRight[sampleIndex] * normalization);
+        sporeLeft[sampleIndex] = sanitizeSample (sporeLeft[sampleIndex] * normalization);
+        sporeRight[sampleIndex] = sanitizeSample (sporeRight[sampleIndex] * normalization);
     }
 }
 
@@ -956,10 +979,14 @@ void AudioPluginAudioProcessor::mergeClusters() noexcept
     b.currentEnergy *= 0.5f;
 }
 
-void AudioPluginAudioProcessor::renderConductionBed (juce::AudioBuffer<float>& destinationBuffer, int numSamples) noexcept
+void AudioPluginAudioProcessor::renderConductionBed (juce::AudioBuffer<float>& destinationBuffer,
+                                                     juce::AudioBuffer<float>& bedDestinationBuffer,
+                                                     int numSamples) noexcept
 {
     auto* wetLeft = destinationBuffer.getWritePointer (0);
     auto* wetRight = destinationBuffer.getWritePointer (1);
+    auto* bedLeftOut = bedDestinationBuffer.getWritePointer (0);
+    auto* bedRightOut = bedDestinationBuffer.getWritePointer (1);
     const auto damping = juce::jlimit (0.0f, 1.0f, getFloatParameterValue (dampingParameter, 0.45f));
     const auto lowpassCoeff = juce::jlimit (0.05f, 0.6f, 0.55f - (damping * 0.45f));
 
@@ -983,6 +1010,43 @@ void AudioPluginAudioProcessor::renderConductionBed (juce::AudioBuffer<float>& d
 
         wetLeft[sampleIndex] = sanitizeSample (wetLeft[sampleIndex] + conductionLowpassLeft);
         wetRight[sampleIndex] = sanitizeSample (wetRight[sampleIndex] + conductionLowpassRight);
+        bedLeftOut[sampleIndex] = sanitizeSample (bedLeftOut[sampleIndex] + conductionLowpassLeft);
+        bedRightOut[sampleIndex] = sanitizeSample (bedRightOut[sampleIndex] + conductionLowpassRight);
+    }
+}
+
+void AudioPluginAudioProcessor::applyStereoShaping (juce::AudioBuffer<float>& destinationBuffer,
+                                                    juce::AudioBuffer<float>& sporeSourceBuffer,
+                                                    juce::AudioBuffer<float>& bedSourceBuffer,
+                                                    int numSamples) noexcept
+{
+    auto* wetLeft = destinationBuffer.getWritePointer (0);
+    auto* wetRight = destinationBuffer.getWritePointer (1);
+    auto* sporeLeft = sporeSourceBuffer.getWritePointer (0);
+    auto* sporeRight = sporeSourceBuffer.getWritePointer (1);
+    auto* bedLeft = bedSourceBuffer.getWritePointer (0);
+    auto* bedRight = bedSourceBuffer.getWritePointer (1);
+
+    for (int sampleIndex = 0; sampleIndex < numSamples; ++sampleIndex)
+    {
+        const auto sporeSideAmount = sporeSideMix.getNextValue();
+        const auto bedMidAmount = bedMidMix.getNextValue();
+
+        const auto sporeMid = 0.5f * (sporeLeft[sampleIndex] + sporeRight[sampleIndex]);
+        const auto sporeSide = 0.5f * (sporeLeft[sampleIndex] - sporeRight[sampleIndex]);
+        const auto shapedSporeSide = sporeSide * (1.0f + sporeSideAmount);
+        const auto shapedSporeLeft = sporeMid + shapedSporeSide;
+        const auto shapedSporeRight = sporeMid - shapedSporeSide;
+
+        const auto bedMid = 0.5f * (bedLeft[sampleIndex] + bedRight[sampleIndex]);
+        const auto bedSide = 0.5f * (bedLeft[sampleIndex] - bedRight[sampleIndex]);
+        const auto shapedBedMid = bedMid * (1.0f + bedMidAmount);
+        const auto shapedBedSide = bedSide * (1.0f - (bedMidAmount * 0.65f));
+        const auto shapedBedLeft = shapedBedMid + shapedBedSide;
+        const auto shapedBedRight = shapedBedMid - shapedBedSide;
+
+        wetLeft[sampleIndex] = sanitizeSample (shapedSporeLeft + shapedBedLeft);
+        wetRight[sampleIndex] = sanitizeSample (shapedSporeRight + shapedBedRight);
     }
 }
 

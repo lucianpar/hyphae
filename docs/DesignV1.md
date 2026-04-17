@@ -201,6 +201,26 @@ Mid/side shaping is the secondary cue:
 spores bias slightly toward Side at higher Spread
 conduction bed remains more Mid-anchored for stability
 keep M/S shaping subtle, level-safe, and smoothed
+
+M6 implementation snapshot
+
+Primary spatial cue: cluster-derived panning remains the first-order stereo behavior
+Secondary spatial cue: a dedicated M/S post-shaping stage is applied after spore and bed rendering
+
+Current mapping:
+
+spore side boost = `0.08 + (Spread * 0.32)`
+bed mid emphasis = `0.10 + (Conduction * 0.28)`
+bed side attenuation scales with the same bed-mid control using a `0.65` reduction factor
+
+Current smoothing:
+
+spore and bed M/S controls both use `30 ms` smoothing, matching the other wet mix smoothing paths
+
+Current policy:
+
+spores get progressively wider as Spread rises
+the conduction bed stays more center-stable even when its taps are panned
 4.5 Wet normalization scaling
 
 Because grains sum, we normalize wet gain by active voices:

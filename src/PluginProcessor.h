@@ -130,7 +130,7 @@ private:
     void scheduleNextSpawnInterval() noexcept;
     void spawnGrainsForBlock (int numSamples) noexcept;
     bool spawnGrainVoice() noexcept;
-    void renderWetGrains (juce::AudioBuffer<float>& wetBuffer, int numSamples) noexcept;
+    void renderWetGrains (juce::AudioBuffer<float>& wetBuffer, juce::AudioBuffer<float>& sporeBuffer, int numSamples) noexcept;
     void updateMyceliumModel (int numSamples) noexcept;
     void updateConductionBedModel() noexcept;
     void initializeClusters (bool randomizeCurrentState) noexcept;
@@ -140,7 +140,11 @@ private:
     int chooseClusterIndex() noexcept;
     void branchCluster() noexcept;
     void mergeClusters() noexcept;
-    void renderConductionBed (juce::AudioBuffer<float>& wetBuffer, int numSamples) noexcept;
+    void renderConductionBed (juce::AudioBuffer<float>& wetBuffer, juce::AudioBuffer<float>& bedBuffer, int numSamples) noexcept;
+    void applyStereoShaping (juce::AudioBuffer<float>& wetBuffer,
+                             juce::AudioBuffer<float>& sporeBuffer,
+                             juce::AudioBuffer<float>& bedBuffer,
+                             int numSamples) noexcept;
 
     juce::AudioProcessorValueTreeState parameters;
     std::atomic<float>* dryWetParameter = nullptr;
@@ -161,9 +165,13 @@ private:
     std::array<ClusterState, maxClusters> clusters {};
     std::array<ConductionTap, conductionTapCount> conductionTaps {};
     juce::AudioBuffer<float> wetBuffer;
+    juce::AudioBuffer<float> sporeBuffer;
+    juce::AudioBuffer<float> bedBuffer;
     juce::LinearSmoothedValue<float> writeGain;
     juce::LinearSmoothedValue<float> dryWetMix;
     juce::LinearSmoothedValue<float> outputGain;
+    juce::LinearSmoothedValue<float> sporeSideMix;
+    juce::LinearSmoothedValue<float> bedMidMix;
     std::minstd_rand randomGenerator;
     double samplesUntilNextSpawn = 0.0;
     double currentSampleRate = 44100.0;

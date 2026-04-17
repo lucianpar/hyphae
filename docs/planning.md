@@ -235,7 +235,7 @@ Notes:
 
 ### M6. Stereo Shaping
 
-Status: `not started`
+Status: `done`
 
 Goals:
 
@@ -247,6 +247,13 @@ Goals:
 Deliverables:
 
 - Exact M/S mapping and smoothing policy documented.
+
+Notes:
+
+- Cluster panning remains the primary stereo cue.
+- Spores now receive a smoothed side boost tied to `Spread`.
+- The conduction bed now receives a smoothed mid emphasis tied to `Conduction`.
+- M/S controls currently use the same `30 ms` smoothing window as the other wet-stage mix controls.
 
 ### M7. Output Safety + Headroom
 
