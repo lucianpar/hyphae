@@ -257,7 +257,7 @@ Notes:
 
 ### M7. Output Safety + Headroom
 
-Status: `not started`
+Status: `done`
 
 Goals:
 
@@ -270,6 +270,12 @@ Deliverables:
 
 - Output is bounded under stress.
 - Limiter or clipper choice and thresholds documented.
+
+Notes:
+
+- Wet normalization now targets `0.85 * (1 / sqrt(activeVoices)) * (1 - (Conduction * 0.08))`.
+- Output protection currently uses a first-order DC blocker with coefficient `0.995`.
+- Final peak control currently uses a normalized `tanh` soft clipper with drive `1.4`.
 
 ### M8. Exact Sim-State Resume
 

@@ -18,6 +18,9 @@ constexpr float clusterSmoothingPerSecond = 6.0f;
 constexpr float minimumClusterEnergy = 0.2f;
 constexpr float maximumClusterEnergy = 1.0f;
 constexpr std::array<float, 4> conductionTapOffsets { 0.0f, 0.21f, 0.47f, 0.79f };
+constexpr float dcBlockerCoefficient = 0.995f;
+constexpr float softClipDrive = 1.4f;
+constexpr float wetHeadroomTarget = 0.85f;
 
 namespace ParameterIds
 {
@@ -317,6 +320,7 @@ void AudioPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPer
     outputGain.reset (currentSampleRate, 0.03);
     sporeSideMix.reset (currentSampleRate, 0.03);
     bedMidMix.reset (currentSampleRate, 0.03);
+    wetNormalizationGain.reset (currentSampleRate, 0.03);
     delayBuffer.prepare (currentSampleRate, delayCapacitySamples);
     wetBuffer.setSize (2, preparedBlockSize, false, false, true);
     sporeBuffer.setSize (2, preparedBlockSize, false, false, true);
@@ -327,6 +331,7 @@ void AudioPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPer
     reseedRandomIfNeeded();
     updateConductionBedModel();
     scheduleNextSpawnInterval();
+    wetNormalizationGain.setCurrentAndTargetValue (1.0f);
 }
 
 void AudioPluginAudioProcessor::releaseResources()
@@ -426,27 +431,7 @@ void AudioPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     renderWetGrains (wetBuffer, sporeBuffer, numSamples);
     renderConductionBed (wetBuffer, bedBuffer, numSamples);
     applyStereoShaping (wetBuffer, sporeBuffer, bedBuffer, numSamples);
-
-    auto* wetLeft = wetBuffer.getWritePointer (0);
-    auto* wetRight = wetBuffer.getWritePointer (1);
-    auto* outputLeft = buffer.getWritePointer (0);
-    auto* outputRight = buffer.getNumChannels() > 1 ? buffer.getWritePointer (1) : nullptr;
-
-    for (int sampleIndex = 0; sampleIndex < numSamples; ++sampleIndex)
-    {
-        const auto dryMix = 1.0f - dryWetMix.getNextValue();
-        const auto wetMix = 1.0f - dryMix;
-        const auto smoothedOutputGain = outputGain.getNextValue();
-
-        const auto dryLeft = sanitizeSample (outputLeft[sampleIndex]);
-        const auto dryRight = outputRight != nullptr ? sanitizeSample (outputRight[sampleIndex]) : dryLeft;
-        const auto mixedLeft = ((dryLeft * dryMix) + (wetLeft[sampleIndex] * wetMix)) * smoothedOutputGain;
-        const auto mixedRight = ((dryRight * dryMix) + (wetRight[sampleIndex] * wetMix)) * smoothedOutputGain;
-
-        outputLeft[sampleIndex] = sanitizeSample (mixedLeft);
-        if (outputRight != nullptr)
-            outputRight[sampleIndex] = sanitizeSample (mixedRight);
-    }
+    applyOutputSafety (wetBuffer, buffer, totalNumInputChannels, totalNumOutputChannels, numSamples);
 
     if (const auto capacitySamples = delayBuffer.getCapacitySamples(); capacitySamples > 1)
     {
@@ -538,6 +523,8 @@ void AudioPluginAudioProcessor::resetDelayState() noexcept
     lastDelayPreviewSample.store (0.0f, std::memory_order_relaxed);
     conductionLowpassLeft = 0.0f;
     conductionLowpassRight = 0.0f;
+    dcBlockerX1 = { 0.0f, 0.0f };
+    dcBlockerY1 = { 0.0f, 0.0f };
 }
 
 void AudioPluginAudioProcessor::resetGrainState() noexcept
@@ -549,6 +536,7 @@ void AudioPluginAudioProcessor::resetGrainState() noexcept
     outputGain.setCurrentAndTargetValue (juce::Decibels::decibelsToGain (getFloatParameterValue (outputTrimDbParameter, 0.0f)));
     sporeSideMix.setCurrentAndTargetValue (0.08f + (juce::jlimit (0.0f, 1.0f, getFloatParameterValue (spreadParameter, 0.6f)) * 0.32f));
     bedMidMix.setCurrentAndTargetValue (0.10f + (juce::jlimit (0.0f, 1.0f, getFloatParameterValue (conductionParameter, 0.4f)) * 0.28f));
+    wetNormalizationGain.setCurrentAndTargetValue (1.0f);
     samplesUntilNextSpawn = 0.0;
     lastActiveGrainCount.store (0, std::memory_order_relaxed);
 }
@@ -1047,6 +1035,61 @@ void AudioPluginAudioProcessor::applyStereoShaping (juce::AudioBuffer<float>& de
 
         wetLeft[sampleIndex] = sanitizeSample (shapedSporeLeft + shapedBedLeft);
         wetRight[sampleIndex] = sanitizeSample (shapedSporeRight + shapedBedRight);
+    }
+}
+
+void AudioPluginAudioProcessor::applyOutputSafety (juce::AudioBuffer<float>& wetSourceBuffer,
+                                                   juce::AudioBuffer<float>& outputBuffer,
+                                                   int totalNumInputChannels,
+                                                   int totalNumOutputChannels,
+                                                   int numSamples) noexcept
+{
+    auto* wetLeft = wetSourceBuffer.getWritePointer (0);
+    auto* wetRight = wetSourceBuffer.getWritePointer (1);
+    auto* outputLeft = outputBuffer.getWritePointer (0);
+    auto* outputRight = totalNumOutputChannels > 1 ? outputBuffer.getWritePointer (1) : nullptr;
+
+    const auto activeVoices = juce::jmax (1, getActiveGrainCountInternal());
+    const auto conduction = juce::jlimit (0.0f, 1.0f, getFloatParameterValue (conductionParameter, 0.4f));
+    const auto wetNormTarget = wetHeadroomTarget
+                               * (1.0f / std::sqrt (static_cast<float> (activeVoices)))
+                               * (1.0f - (conduction * 0.08f));
+    wetNormalizationGain.setTargetValue (juce::jlimit (0.2f, 1.0f, wetNormTarget));
+
+    for (int sampleIndex = 0; sampleIndex < numSamples; ++sampleIndex)
+    {
+        const auto smoothedWetNorm = wetNormalizationGain.getNextValue();
+        const auto wetLeftSample = wetLeft[sampleIndex] * smoothedWetNorm;
+        const auto wetRightSample = wetRight[sampleIndex] * smoothedWetNorm;
+
+        const auto dryMix = 1.0f - dryWetMix.getNextValue();
+        const auto wetMix = 1.0f - dryMix;
+        const auto smoothedOutputGain = outputGain.getNextValue();
+
+        const auto dryLeft = sanitizeSample (outputLeft[sampleIndex]);
+        const auto dryRight = outputRight != nullptr
+                                  ? sanitizeSample (outputRight[sampleIndex])
+                                  : (totalNumInputChannels > 0 ? dryLeft : 0.0f);
+
+        auto mixedLeft = ((dryLeft * dryMix) + (wetLeftSample * wetMix)) * smoothedOutputGain;
+        auto mixedRight = ((dryRight * dryMix) + (wetRightSample * wetMix)) * smoothedOutputGain;
+
+        mixedLeft = sanitizeSample (mixedLeft);
+        mixedRight = sanitizeSample (mixedRight);
+
+        const auto dcLeft = mixedLeft - dcBlockerX1[0] + (dcBlockerCoefficient * dcBlockerY1[0]);
+        const auto dcRight = mixedRight - dcBlockerX1[1] + (dcBlockerCoefficient * dcBlockerY1[1]);
+        dcBlockerX1[0] = mixedLeft;
+        dcBlockerY1[0] = sanitizeSample (dcLeft);
+        dcBlockerX1[1] = mixedRight;
+        dcBlockerY1[1] = sanitizeSample (dcRight);
+
+        const auto clippedLeft = std::tanh (softClipDrive * dcBlockerY1[0]) / std::tanh (softClipDrive);
+        const auto clippedRight = std::tanh (softClipDrive * dcBlockerY1[1]) / std::tanh (softClipDrive);
+
+        outputLeft[sampleIndex] = sanitizeSample (clippedLeft);
+        if (outputRight != nullptr)
+            outputRight[sampleIndex] = sanitizeSample (clippedRight);
     }
 }
 

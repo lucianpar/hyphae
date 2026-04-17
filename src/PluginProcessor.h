@@ -145,6 +145,11 @@ private:
                              juce::AudioBuffer<float>& sporeBuffer,
                              juce::AudioBuffer<float>& bedBuffer,
                              int numSamples) noexcept;
+    void applyOutputSafety (juce::AudioBuffer<float>& wetBuffer,
+                            juce::AudioBuffer<float>& outputBuffer,
+                            int totalNumInputChannels,
+                            int totalNumOutputChannels,
+                            int numSamples) noexcept;
 
     juce::AudioProcessorValueTreeState parameters;
     std::atomic<float>* dryWetParameter = nullptr;
@@ -172,6 +177,7 @@ private:
     juce::LinearSmoothedValue<float> outputGain;
     juce::LinearSmoothedValue<float> sporeSideMix;
     juce::LinearSmoothedValue<float> bedMidMix;
+    juce::LinearSmoothedValue<float> wetNormalizationGain;
     std::minstd_rand randomGenerator;
     double samplesUntilNextSpawn = 0.0;
     double currentSampleRate = 44100.0;
@@ -182,6 +188,8 @@ private:
     bool lastSporeBurstState = false;
     float conductionLowpassLeft = 0.0f;
     float conductionLowpassRight = 0.0f;
+    std::array<float, 2> dcBlockerX1 { 0.0f, 0.0f };
+    std::array<float, 2> dcBlockerY1 { 0.0f, 0.0f };
     std::atomic<float> lastDelayPreviewSample { 0.0f };
     std::atomic<float> lastWriteGain { 1.0f };
     std::atomic<int> lastActiveGrainCount { 0 };

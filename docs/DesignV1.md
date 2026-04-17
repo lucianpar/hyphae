@@ -227,7 +227,26 @@ Because grains sum, we normalize wet gain by active voices:
 
 Compute normTarget = 1/sqrt(max(1, activeVoices))
 Smooth normTarget per block to avoid pumping
-Apply to wet spore sum (and optionally to bed) so “soft storm” increases activity without blasting level 5. Mycelium control model
+Apply to wet spore sum (and optionally to bed) so “soft storm” increases activity without blasting level
+
+M7 implementation snapshot
+
+Current wet headroom normalization:
+
+`wetNormTarget = 0.85 * (1 / sqrt(activeVoices)) * (1 - (Conduction * 0.08))`
+smoothed with the same `30 ms` time constant used elsewhere in the wet stage
+
+Current output protection:
+
+DC blocker: first-order high-pass / DC blocker using coefficient `0.995`
+Soft clipper: normalized `tanh` clipper with drive `1.4`
+
+Current output policy:
+
+wet layer is normalized before the dry/wet mix
+final mixed output is DC-blocked, then softly clipped
+protection is intentionally gentle in v0.1 and is meant to prevent runaway peaks rather than act as a loud master limiter
+5. Mycelium control model
 5.1 Representation (v0.1)
 
 Use a small number of cluster centers instead of simulating a large graph.
