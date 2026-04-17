@@ -175,6 +175,18 @@ Tap topology
 Damping filter (one-pole LP) for tone control
 Tap gains scaled to keep headroom
 
+M5 implementation snapshot
+
+Tap count: fixed `4` taps in the current implementation
+Feedback: none
+Tap time strategy: mycelium-informed center/spread derived from the active clusters, then distributed by fixed offsets
+Current tap delay range: clamped to `30..350 ms`
+Current bed center: approximately `(averageClusterDelayMs * 0.55) + 30 ms`
+Current bed spread: wider when cluster coherence is lower, narrower when coherence is higher
+Current tap panning: mildly Mid-anchored, with only subtle stereo offsets
+Current damping: one-pole low-pass behavior driven by the Damping parameter
+Current gain staging: tap gains decay across the four taps and scale with Conduction plus average cluster energy
+
 Creativity note
 
 “Delay texture” means it is audible when Conduction is raised, not just a hidden glue.

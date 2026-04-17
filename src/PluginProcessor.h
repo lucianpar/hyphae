@@ -64,6 +64,7 @@ public:
 private:
     static constexpr int maxGrainVoices = 12;
     static constexpr int maxClusters = 4;
+    static constexpr int conductionTapCount = 4;
 
     class DelayBuffer
     {
@@ -110,6 +111,13 @@ private:
         float ageSeconds = 0.0f;
     };
 
+    struct ConductionTap
+    {
+        float delayMs = 90.0f;
+        float gain = 0.15f;
+        float pan = 0.0f;
+    };
+
     void resetDelayState() noexcept;
     void resetGrainState() noexcept;
     void resetMyceliumState() noexcept;
@@ -124,6 +132,7 @@ private:
     bool spawnGrainVoice() noexcept;
     void renderWetGrains (juce::AudioBuffer<float>& wetBuffer, int numSamples) noexcept;
     void updateMyceliumModel (int numSamples) noexcept;
+    void updateConductionBedModel() noexcept;
     void initializeClusters (bool randomizeCurrentState) noexcept;
     void handleSporeBurstTrigger() noexcept;
     void reseedClusterTargets() noexcept;
@@ -131,6 +140,7 @@ private:
     int chooseClusterIndex() noexcept;
     void branchCluster() noexcept;
     void mergeClusters() noexcept;
+    void renderConductionBed (juce::AudioBuffer<float>& wetBuffer, int numSamples) noexcept;
 
     juce::AudioProcessorValueTreeState parameters;
     std::atomic<float>* dryWetParameter = nullptr;
@@ -142,11 +152,14 @@ private:
     std::atomic<float>* growthParameter = nullptr;
     std::atomic<float>* nutrientsParameter = nullptr;
     std::atomic<float>* seedParameter = nullptr;
+    std::atomic<float>* conductionParameter = nullptr;
+    std::atomic<float>* dampingParameter = nullptr;
     std::atomic<float>* sporeBurstParameter = nullptr;
     std::atomic<float>* freezeParameter = nullptr;
     DelayBuffer delayBuffer;
     std::array<GrainVoice, maxGrainVoices> grainVoices {};
     std::array<ClusterState, maxClusters> clusters {};
+    std::array<ConductionTap, conductionTapCount> conductionTaps {};
     juce::AudioBuffer<float> wetBuffer;
     juce::LinearSmoothedValue<float> writeGain;
     juce::LinearSmoothedValue<float> dryWetMix;
@@ -159,6 +172,8 @@ private:
     int lastSeedValue = 12345;
     int targetClusterCount = 3;
     bool lastSporeBurstState = false;
+    float conductionLowpassLeft = 0.0f;
+    float conductionLowpassRight = 0.0f;
     std::atomic<float> lastDelayPreviewSample { 0.0f };
     std::atomic<float> lastWriteGain { 1.0f };
     std::atomic<int> lastActiveGrainCount { 0 };

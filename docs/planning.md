@@ -213,7 +213,7 @@ Notes:
 
 ### M5. Conduction Bed
 
-Status: `not started`
+Status: `done`
 
 Goals:
 
@@ -225,6 +225,13 @@ Deliverables:
 
 - Conduction texture is clearly audible and level-safe.
 - Docs capture tap strategy and mapping.
+
+Notes:
+
+- Current implementation uses a fixed `4`-tap no-feedback bed.
+- Tap timing is derived from the active cluster field rather than being fully static.
+- Delay times are currently clamped to `30..350 ms`.
+- Damping is implemented as a one-pole low-pass bed tone control.
 
 ### M6. Stereo Shaping
 

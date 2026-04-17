@@ -17,6 +17,7 @@ constexpr float voiceBaseGain = 0.18f;
 constexpr float clusterSmoothingPerSecond = 6.0f;
 constexpr float minimumClusterEnergy = 0.2f;
 constexpr float maximumClusterEnergy = 1.0f;
+constexpr std::array<float, 4> conductionTapOffsets { 0.0f, 0.21f, 0.47f, 0.79f };
 
 namespace ParameterIds
 {
@@ -74,10 +75,13 @@ AudioPluginAudioProcessor::AudioPluginAudioProcessor()
     growthParameter = parameters.getRawParameterValue (ParameterIds::growth);
     nutrientsParameter = parameters.getRawParameterValue (ParameterIds::nutrients);
     seedParameter = parameters.getRawParameterValue (ParameterIds::seed);
+    conductionParameter = parameters.getRawParameterValue (ParameterIds::conduction);
+    dampingParameter = parameters.getRawParameterValue (ParameterIds::damping);
     sporeBurstParameter = parameters.getRawParameterValue (ParameterIds::sporeBurst);
     freezeParameter = parameters.getRawParameterValue (ParameterIds::freeze);
     randomGenerator.seed (static_cast<std::minstd_rand::result_type> (lastSeedValue));
     initializeClusters (true);
+    updateConductionBedModel();
     scheduleNextSpawnInterval();
 }
 
@@ -317,6 +321,7 @@ void AudioPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPer
     resetGrainState();
     resetMyceliumState();
     reseedRandomIfNeeded();
+    updateConductionBedModel();
     scheduleNextSpawnInterval();
 }
 
@@ -382,6 +387,7 @@ void AudioPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     reseedRandomIfNeeded();
     handleSporeBurstTrigger();
     updateMyceliumModel (numSamples);
+    updateConductionBedModel();
 
     writeGain.setTargetValue (getFreezeTargetWriteGain());
     dryWetMix.setTargetValue (getFloatParameterValue (dryWetParameter, 0.5f));
@@ -408,6 +414,7 @@ void AudioPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     }
 
     renderWetGrains (wetBuffer, numSamples);
+    renderConductionBed (wetBuffer, numSamples);
 
     auto* wetLeft = wetBuffer.getWritePointer (0);
     auto* wetRight = wetBuffer.getWritePointer (1);
@@ -518,6 +525,8 @@ void AudioPluginAudioProcessor::resetDelayState() noexcept
     writeGain.setCurrentAndTargetValue (1.0f);
     lastWriteGain.store (1.0f, std::memory_order_relaxed);
     lastDelayPreviewSample.store (0.0f, std::memory_order_relaxed);
+    conductionLowpassLeft = 0.0f;
+    conductionLowpassRight = 0.0f;
 }
 
 void AudioPluginAudioProcessor::resetGrainState() noexcept
@@ -536,6 +545,7 @@ void AudioPluginAudioProcessor::resetMyceliumState() noexcept
     myceliumEventTimerSamples = 0.0;
     lastSporeBurstState = false;
     initializeClusters (true);
+    updateConductionBedModel();
 }
 
 float AudioPluginAudioProcessor::getFreezeTargetWriteGain() const noexcept
@@ -736,6 +746,56 @@ void AudioPluginAudioProcessor::updateMyceliumModel (int numSamples) noexcept
     }
 }
 
+void AudioPluginAudioProcessor::updateConductionBedModel() noexcept
+{
+    const auto conduction = juce::jlimit (0.0f, 1.0f, getFloatParameterValue (conductionParameter, 0.4f));
+    const auto damping = juce::jlimit (0.0f, 1.0f, getFloatParameterValue (dampingParameter, 0.45f));
+    const auto activeClusters = juce::jmax (1, getActiveClusterCount());
+
+    float averageDelayMs = 220.0f;
+    float averageEnergy = 0.5f;
+    float averagePan = 0.0f;
+
+    if (activeClusters > 0)
+    {
+        averageDelayMs = 0.0f;
+        averageEnergy = 0.0f;
+        averagePan = 0.0f;
+
+        for (const auto& cluster : clusters)
+        {
+            if (! cluster.active)
+                continue;
+
+            averageDelayMs += cluster.currentDelayMs;
+            averageEnergy += cluster.currentEnergy;
+            averagePan += cluster.currentPanCenter;
+        }
+
+        averageDelayMs /= static_cast<float> (activeClusters);
+        averageEnergy /= static_cast<float> (activeClusters);
+        averagePan /= static_cast<float> (activeClusters);
+    }
+
+    const auto coherence = juce::jlimit (0.0f, 1.0f, 0.35f + (getFloatParameterValue (growthParameter, 0.5f) * 0.4f)
+                                                       + (getFloatParameterValue (nutrientsParameter, 0.5f) * 0.15f));
+    const auto bedCenterMs = juce::jlimit (40.0f, 320.0f, (averageDelayMs * 0.55f) + 30.0f);
+    const auto bedSpreadMs = juce::jlimit (18.0f, 140.0f, (1.0f - coherence) * 110.0f + 24.0f);
+
+    for (int index = 0; index < conductionTapCount; ++index)
+    {
+        auto& tap = conductionTaps[static_cast<size_t> (index)];
+        const auto signedOffset = (conductionTapOffsets[static_cast<size_t> (index)] - 0.4f) * bedSpreadMs * 1.8f;
+        tap.delayMs = juce::jlimit (30.0f, 350.0f, bedCenterMs + signedOffset);
+        tap.gain = conduction * (0.16f - (0.024f * static_cast<float> (index))) * juce::jmap (averageEnergy, 0.8f, 1.15f);
+        tap.pan = juce::jlimit (-0.45f, 0.45f, (averagePan * 0.35f) + ((static_cast<float> (index) - 1.5f) * 0.12f * (1.0f - coherence)));
+    }
+
+    const auto dampingBlend = juce::jlimit (0.05f, 0.6f, 0.55f - (damping * 0.45f));
+    conductionLowpassLeft *= (1.0f - dampingBlend);
+    conductionLowpassRight *= (1.0f - dampingBlend);
+}
+
 void AudioPluginAudioProcessor::initializeClusters (bool randomizeCurrentState) noexcept
 {
     targetClusterCount = 3;
@@ -894,6 +954,36 @@ void AudioPluginAudioProcessor::mergeClusters() noexcept
     b.active = false;
     b.targetEnergy = 0.0f;
     b.currentEnergy *= 0.5f;
+}
+
+void AudioPluginAudioProcessor::renderConductionBed (juce::AudioBuffer<float>& destinationBuffer, int numSamples) noexcept
+{
+    auto* wetLeft = destinationBuffer.getWritePointer (0);
+    auto* wetRight = destinationBuffer.getWritePointer (1);
+    const auto damping = juce::jlimit (0.0f, 1.0f, getFloatParameterValue (dampingParameter, 0.45f));
+    const auto lowpassCoeff = juce::jlimit (0.05f, 0.6f, 0.55f - (damping * 0.45f));
+
+    for (int sampleIndex = 0; sampleIndex < numSamples; ++sampleIndex)
+    {
+        float bedLeft = 0.0f;
+        float bedRight = 0.0f;
+
+        for (const auto& tap : conductionTaps)
+        {
+            const auto delaySamples = tap.delayMs * 0.001f * static_cast<float> (currentSampleRate);
+            const auto sourceSample = delayBuffer.readDelaySamples (delaySamples);
+            const auto angle = (tap.pan + 1.0f) * 0.25f * juce::MathConstants<float>::pi;
+            const auto tapSample = sanitizeSample (sourceSample * tap.gain);
+            bedLeft += tapSample * std::cos (angle);
+            bedRight += tapSample * std::sin (angle);
+        }
+
+        conductionLowpassLeft += lowpassCoeff * (bedLeft - conductionLowpassLeft);
+        conductionLowpassRight += lowpassCoeff * (bedRight - conductionLowpassRight);
+
+        wetLeft[sampleIndex] = sanitizeSample (wetLeft[sampleIndex] + conductionLowpassLeft);
+        wetRight[sampleIndex] = sanitizeSample (wetRight[sampleIndex] + conductionLowpassRight);
+    }
 }
 
 //==============================================================================
