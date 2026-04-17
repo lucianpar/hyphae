@@ -137,7 +137,7 @@ Notes:
 
 ### M2. Delay Buffer
 
-Status: `not started`
+Status: `done`
 
 Goals:
 
@@ -156,6 +156,13 @@ Deliverables:
 
 - Delay buffer sized in `prepareToPlay()`.
 - Memory formula and cap documented.
+
+Notes:
+
+- Current implementation uses a single-channel float ring buffer allocated in `prepareToPlay()`.
+- Buffer sizing is `clamp (ceil (sampleRate * 8.0), 1, 1536000)`.
+- Freeze currently ducks writes with a smoothed `30 ms` write-gain ramp.
+- A bounded linear-interpolated `250 ms` preview read is available for verification in the placeholder editor.
 
 ### M3. Grain Voice Pool + Hann Window
 

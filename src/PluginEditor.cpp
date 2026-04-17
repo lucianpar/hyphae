@@ -33,12 +33,21 @@ void AudioPluginAudioProcessorEditor::paint (juce::Graphics& g)
     const auto parameterCount = processorRef.getValueTreeState().state.getNumChildren()
                                 + processorRef.getParameters().size();
     const auto stateVersion = processorRef.getValueTreeState().state.getProperty ("stateVersion");
+    const auto bufferSamples = processorRef.getDelayBufferCapacitySamples();
+    const auto previewSample = processorRef.getLastDelayPreviewSample();
+    const auto currentWriteGain = processorRef.getLastWriteGain();
 
     g.drawFittedText ("Parameters: " + juce::String (parameterCount), bounds.removeFromTop (22),
                       juce::Justification::centredLeft, 1);
     g.drawFittedText ("State version: " + stateVersion.toString(), bounds.removeFromTop (22),
                       juce::Justification::centredLeft, 1);
-    g.drawFittedText ("Next up: delay buffer, grain pool, and real controls.", bounds.removeFromTop (22),
+    g.drawFittedText ("Delay buffer: " + juce::String (bufferSamples) + " samples", bounds.removeFromTop (22),
+                      juce::Justification::centredLeft, 1);
+    g.drawFittedText ("Freeze write gain: " + juce::String (currentWriteGain, 2), bounds.removeFromTop (22),
+                      juce::Justification::centredLeft, 1);
+    g.drawFittedText ("250 ms preview sample: " + juce::String (previewSample, 3), bounds.removeFromTop (22),
+                      juce::Justification::centredLeft, 1);
+    g.drawFittedText ("Next up: grain pool, conduction bed, and real controls.", bounds.removeFromTop (22),
                       juce::Justification::centredLeft, 1);
 }
 

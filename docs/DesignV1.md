@@ -98,6 +98,32 @@ Allocated only in prepareToPlay()
 No resizing / allocations in processBlock()
 Linear interpolation for fractional delays
 Strict bounds checking for reads
+
+M2 implementation snapshot
+
+Buffer type: single-channel float ring buffer
+Write source: mono average of currently active input channels
+Write smoothing: Freeze controls a smoothed write gain ramp with a `30 ms` time constant
+Read path: bounded linear interpolation from the most recently written sample backward in time
+Current diagnostic read: a `250 ms` preview tap used for verification in the placeholder editor
+
+Current caps and sizing
+
+`maxDelaySeconds = 8.0`
+`maxSupportedSampleRate = 192000.0`
+`hardCapDelaySamples = 1536000`
+
+Allocation formula in `prepareToPlay()`:
+
+`delayCapacitySamples = clamp (ceil (sampleRate * 8.0), 1, 1536000)`
+buffer bytes = `delayCapacitySamples * sizeof(float)`
+
+Examples:
+
+at `44100 Hz`: `352800` samples, `1411200` bytes
+at `48000 Hz`: `384000` samples, `1536000` bytes
+at `96000 Hz`: `768000` samples, `3072000` bytes
+at `192000 Hz`: `1536000` samples, `6144000` bytes
 4.2 Spore grain engine
 
 Voices: fixed pool of 12 concurrent grains.
@@ -280,8 +306,10 @@ Design doc note: v0.2+ increases this; must preserve level behavior via normaliz
 Hard caps:
 
 maxDelaySeconds = 8.0 in v0.1 (compile-time constant)
+maxSupportedSampleRate = 192000.0 in the current implementation
+HARD_CAP_SAMPLES = 1536000
 maxDelaySamples = clamp(sr \* maxDelaySeconds, 1, HARD_CAP_SAMPLES)
-HARD_CAP_SAMPLES protects against absurd host sample rates.
+HARD_CAP_SAMPLES protects against absurd host sample rates and keeps the current buffer allocation under ~6.14 MB.
 
 Allocation policy:
 

@@ -1,6 +1,8 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 
+#include <cmath>
+
 namespace
 {
 constexpr auto stateType = "HyphaeState";
@@ -33,6 +35,11 @@ juce::AudioParameterFloatAttributes makePercentAttributes (const juce::String& l
 {
     return juce::AudioParameterFloatAttributes().withLabel (label);
 }
+
+float sanitizeSample (float sample) noexcept
+{
+    return std::isfinite (sample) ? sample : 0.0f;
+}
 } // namespace
 
 //==============================================================================
@@ -48,10 +55,67 @@ AudioPluginAudioProcessor::AudioPluginAudioProcessor()
        parameters (*this, nullptr, stateType, createParameterLayout())
 {
     parameters.state.setProperty (stateVersionProperty, currentStateVersion, nullptr);
+    freezeParameter = parameters.getRawParameterValue (ParameterIds::freeze);
 }
 
 AudioPluginAudioProcessor::~AudioPluginAudioProcessor()
 {
+}
+
+void AudioPluginAudioProcessor::DelayBuffer::prepare (double sampleRate, int maximumDelaySamples)
+{
+    juce::ignoreUnused (sampleRate);
+
+    samples.assign (static_cast<size_t> (juce::jmax (1, maximumDelaySamples)), 0.0f);
+    clear();
+}
+
+void AudioPluginAudioProcessor::DelayBuffer::clear() noexcept
+{
+    std::fill (samples.begin(), samples.end(), 0.0f);
+    writeIndex = 0;
+    validSampleCount = 0;
+}
+
+void AudioPluginAudioProcessor::DelayBuffer::write (float sample) noexcept
+{
+    if (samples.empty())
+        return;
+
+    samples[static_cast<size_t> (writeIndex)] = sanitizeSample (sample);
+    writeIndex = (writeIndex + 1) % static_cast<int> (samples.size());
+    validSampleCount = juce::jmin (validSampleCount + 1, static_cast<int> (samples.size()));
+}
+
+float AudioPluginAudioProcessor::DelayBuffer::readDelaySamples (float delaySamples) const noexcept
+{
+    if (samples.empty() || validSampleCount <= 0)
+        return 0.0f;
+
+    const auto maxReadableDelay = static_cast<float> (juce::jmax (0, validSampleCount - 1));
+    const auto clampedDelay = juce::jlimit (0.0f, maxReadableDelay, sanitizeSample (delaySamples));
+    const auto readPosition = static_cast<float> (writeIndex - 1) - clampedDelay;
+    const auto bufferSize = static_cast<float> (samples.size());
+
+    auto wrappedReadPosition = readPosition;
+    while (wrappedReadPosition < 0.0f)
+        wrappedReadPosition += bufferSize;
+
+    while (wrappedReadPosition >= bufferSize)
+        wrappedReadPosition -= bufferSize;
+
+    const auto indexA = static_cast<int> (wrappedReadPosition);
+    const auto indexB = (indexA + 1) % static_cast<int> (samples.size());
+    const auto fraction = wrappedReadPosition - static_cast<float> (indexA);
+    const auto sampleA = samples[static_cast<size_t> (indexA)];
+    const auto sampleB = samples[static_cast<size_t> (indexB)];
+
+    return sanitizeSample (sampleA + fraction * (sampleB - sampleA));
+}
+
+int AudioPluginAudioProcessor::DelayBuffer::getCapacitySamples() const noexcept
+{
+    return static_cast<int> (samples.size());
 }
 
 juce::AudioProcessorValueTreeState::ParameterLayout AudioPluginAudioProcessor::createParameterLayout()
@@ -212,15 +276,22 @@ void AudioPluginAudioProcessor::changeProgramName (int index, const juce::String
 //==============================================================================
 void AudioPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    // Use this method as the place to do any pre-playback
-    // initialisation that you need..
     juce::ignoreUnused (sampleRate, samplesPerBlock);
+
+    currentSampleRate = juce::jlimit (1.0, maxSupportedSampleRate, sampleRate);
+
+    const auto delayCapacitySamples = juce::jlimit (1,
+                                                    hardCapDelaySamples,
+                                                    static_cast<int> (std::ceil (currentSampleRate * maxDelaySeconds)));
+
+    writeGain.reset (currentSampleRate, 0.03);
+    delayBuffer.prepare (currentSampleRate, delayCapacitySamples);
+    resetDelayState();
 }
 
 void AudioPluginAudioProcessor::releaseResources()
 {
-    // When playback stops, you can use this as an opportunity to free up any
-    // spare memory, etc.
+    resetDelayState();
 }
 
 bool AudioPluginAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
@@ -265,17 +336,37 @@ void AudioPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
         buffer.clear (i, 0, buffer.getNumSamples());
 
-    // This is the place where you'd normally do the guts of your plugin's
-    // audio processing...
-    // Make sure to reset the state if your inner loop is processing
-    // the samples and the outer loop is handling the channels.
-    // Alternatively, you can process the samples with the channels
-    // interleaved by keeping the same state.
-    for (int channel = 0; channel < totalNumInputChannels; ++channel)
+    const auto numSamples = buffer.getNumSamples();
+    if (numSamples <= 0)
+        return;
+
+    writeGain.setTargetValue (getFreezeTargetWriteGain());
+
+    for (int sampleIndex = 0; sampleIndex < numSamples; ++sampleIndex)
     {
-        auto* channelData = buffer.getWritePointer (channel);
-        juce::ignoreUnused (channelData);
-        // ..do something to the data...
+        float monoSum = 0.0f;
+
+        for (int channel = 0; channel < totalNumInputChannels; ++channel)
+            monoSum += sanitizeSample (buffer.getReadPointer (channel)[sampleIndex]);
+
+        if (totalNumInputChannels > 0)
+            monoSum /= static_cast<float> (totalNumInputChannels);
+
+        const auto smoothedWriteGain = writeGain.getNextValue();
+        delayBuffer.write (monoSum * smoothedWriteGain);
+        lastWriteGain.store (smoothedWriteGain, std::memory_order_relaxed);
+    }
+
+    if (const auto capacitySamples = delayBuffer.getCapacitySamples(); capacitySamples > 1)
+    {
+        const auto previewDelaySamples = static_cast<float> (juce::jlimit (1.0,
+                                                                           static_cast<double> (capacitySamples - 1),
+                                                                           currentSampleRate * 0.25));
+        lastDelayPreviewSample.store (delayBuffer.readDelaySamples (previewDelaySamples), std::memory_order_relaxed);
+    }
+    else
+    {
+        lastDelayPreviewSample.store (0.0f, std::memory_order_relaxed);
     }
 }
 
@@ -326,6 +417,37 @@ juce::AudioProcessorValueTreeState& AudioPluginAudioProcessor::getValueTreeState
 const juce::AudioProcessorValueTreeState& AudioPluginAudioProcessor::getValueTreeState() const noexcept
 {
     return parameters;
+}
+
+float AudioPluginAudioProcessor::getLastDelayPreviewSample() const noexcept
+{
+    return lastDelayPreviewSample.load (std::memory_order_relaxed);
+}
+
+float AudioPluginAudioProcessor::getLastWriteGain() const noexcept
+{
+    return lastWriteGain.load (std::memory_order_relaxed);
+}
+
+int AudioPluginAudioProcessor::getDelayBufferCapacitySamples() const noexcept
+{
+    return delayBuffer.getCapacitySamples();
+}
+
+void AudioPluginAudioProcessor::resetDelayState() noexcept
+{
+    delayBuffer.clear();
+    writeGain.setCurrentAndTargetValue (1.0f);
+    lastWriteGain.store (1.0f, std::memory_order_relaxed);
+    lastDelayPreviewSample.store (0.0f, std::memory_order_relaxed);
+}
+
+float AudioPluginAudioProcessor::getFreezeTargetWriteGain() const noexcept
+{
+    if (freezeParameter == nullptr)
+        return 1.0f;
+
+    return *freezeParameter >= 0.5f ? 0.0f : 1.0f;
 }
 
 //==============================================================================
