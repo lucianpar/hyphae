@@ -196,36 +196,82 @@ triggers a topology reseed (new cluster centers / ages / energies)
 does not spike density
 reconfiguration must be click-free:
 either smooth cluster center transitions over ~50–200 ms
-and/or apply a short density multiplier ramp down/up without a “gust” peak 6. Parameters
+and/or apply a short density multiplier ramp down/up without a “gust” peak
+6. Parameters
 6.1 v0.1 parameter set
 
-(Exact ranges/defaults should be finalized as part of implementation and written here.)
+M1 implementation snapshot
+
+APVTS root type: `HyphaeState`
+State version property: `stateVersion = 1`
 
 Core mix:
 
-DryWet (0..1)
-OutputTrimDb (e.g., −18..+6 dB)
+`dryWet`
+Display name: Dry/Wet
+Range/default: `0.0..1.0`, default `0.5`
+
+`outputTrimDb`
+Display name: Output Trim
+Range/default: `-18.0..6.0 dB`, default `0.0 dB`
 
 Spore:
 
-Density (grains/sec, capped by spawn budget and voices)
-SizeMs (locked min/max for v0.1)
-Scatter (0..1)
-Spread (0..1)
-Growth (0..1)
-Nutrients (0..1)
-Seed (int)
+`density`
+Display name: Density
+Range/default: `0.1..24.0 grains/s`, default `4.0`
+Note: this is the control range only; later DSP stages still enforce spawn-budget and voice-cap limits
+
+`sizeMs`
+Display name: Size
+Range/default: `20.0..180.0 ms`, default `80.0 ms`
+Note: this is the provisional v0.1 locked range from M1 and may be tightened once the grain engine is tuned
+
+`scatter`
+Display name: Scatter
+Range/default: `0.0..1.0`, default `0.35`
+
+`spread`
+Display name: Spread
+Range/default: `0.0..1.0`, default `0.6`
+
+`growth`
+Display name: Growth
+Range/default: `0.0..1.0`, default `0.5`
+
+`nutrients`
+Display name: Nutrients
+Range/default: `0.0..1.0`, default `0.5`
+
+`seed`
+Display name: Seed
+Range/default: integer `0..65535`, default `12345`
 
 Conduction:
 
-Conduction (0..1)
-Damping (0..1)
+`conduction`
+Display name: Conduction
+Range/default: `0.0..1.0`, default `0.4`
+
+`damping`
+Display name: Damping
+Range/default: `0.0..1.0`, default `0.45`
 
 Actions:
 
-SporeBurst (momentary)
-Freeze (toggle; ducks writes)
-ResetClear (momentary; clears sim state, kills active grains, clears delay buffer)
+`sporeBurst`
+Display name: Spore Burst
+Current M1 implementation: boolean action flag, default `false`
+Intended later behavior: momentary trigger
+
+`freeze`
+Display name: Freeze
+Current M1 implementation: boolean toggle, default `false`
+
+`resetClear`
+Display name: Reset/Clear
+Current M1 implementation: boolean action flag, default `false`
+Intended later behavior: momentary trigger that clears sim/buffer state
 6.2 Locked v0.1 voice cap
 MaxVoices = 12 fixed internally
 Design doc note: v0.2+ increases this; must preserve level behavior via normalization. 7. Safety and robustness
@@ -272,6 +318,13 @@ if non-finite sample detected: zero and reset the responsible voice/state
 7.7 State saving + exact resume policy
 
 Goal: resume exact sim timeline/state (not only Seed).
+
+Current M1 implementation stores:
+
+the APVTS parameter tree under root type `HyphaeState`
+the root property `stateVersion = 1`
+
+This means the plugin now has stable versioned parameter save/restore, but not yet the full sim-state resume required by later milestones.
 
 State must include:
 

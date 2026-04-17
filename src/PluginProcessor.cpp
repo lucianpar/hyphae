@@ -1,6 +1,40 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 
+namespace
+{
+constexpr auto stateType = "HyphaeState";
+constexpr auto stateVersionProperty = "stateVersion";
+
+namespace ParameterIds
+{
+constexpr auto dryWet = "dryWet";
+constexpr auto outputTrimDb = "outputTrimDb";
+constexpr auto density = "density";
+constexpr auto sizeMs = "sizeMs";
+constexpr auto scatter = "scatter";
+constexpr auto spread = "spread";
+constexpr auto growth = "growth";
+constexpr auto nutrients = "nutrients";
+constexpr auto seed = "seed";
+constexpr auto conduction = "conduction";
+constexpr auto damping = "damping";
+constexpr auto sporeBurst = "sporeBurst";
+constexpr auto freeze = "freeze";
+constexpr auto resetClear = "resetClear";
+} // namespace ParameterIds
+
+juce::NormalisableRange<float> percentRange()
+{
+    return { 0.0f, 1.0f, 0.001f };
+}
+
+juce::AudioParameterFloatAttributes makePercentAttributes (const juce::String& label)
+{
+    return juce::AudioParameterFloatAttributes().withLabel (label);
+}
+} // namespace
+
 //==============================================================================
 AudioPluginAudioProcessor::AudioPluginAudioProcessor()
      : AudioProcessor (BusesProperties()
@@ -10,12 +44,104 @@ AudioPluginAudioProcessor::AudioPluginAudioProcessor()
                       #endif
                        .withOutput ("Output", juce::AudioChannelSet::stereo(), true)
                      #endif
-                       )
+                       ),
+       parameters (*this, nullptr, stateType, createParameterLayout())
 {
+    parameters.state.setProperty (stateVersionProperty, currentStateVersion, nullptr);
 }
 
 AudioPluginAudioProcessor::~AudioPluginAudioProcessor()
 {
+}
+
+juce::AudioProcessorValueTreeState::ParameterLayout AudioPluginAudioProcessor::createParameterLayout()
+{
+    using FloatParameter = juce::AudioParameterFloat;
+    using BoolParameter = juce::AudioParameterBool;
+    using IntParameter = juce::AudioParameterInt;
+
+    std::vector<std::unique_ptr<juce::RangedAudioParameter>> layout;
+    layout.reserve (14);
+
+    layout.push_back (std::make_unique<FloatParameter> (juce::ParameterID { ParameterIds::dryWet, 1 },
+                                                        "Dry/Wet",
+                                                        percentRange(),
+                                                        0.5f,
+                                                        makePercentAttributes ("%")));
+
+    layout.push_back (std::make_unique<FloatParameter> (juce::ParameterID { ParameterIds::outputTrimDb, 1 },
+                                                        "Output Trim",
+                                                        juce::NormalisableRange<float> { -18.0f, 6.0f, 0.1f },
+                                                        0.0f,
+                                                        juce::AudioParameterFloatAttributes().withLabel ("dB")));
+
+    layout.push_back (std::make_unique<FloatParameter> (juce::ParameterID { ParameterIds::density, 1 },
+                                                        "Density",
+                                                        juce::NormalisableRange<float> { 0.1f, 24.0f, 0.01f, 0.4f },
+                                                        4.0f,
+                                                        juce::AudioParameterFloatAttributes().withLabel ("grains/s")));
+
+    layout.push_back (std::make_unique<FloatParameter> (juce::ParameterID { ParameterIds::sizeMs, 1 },
+                                                        "Size",
+                                                        juce::NormalisableRange<float> { 20.0f, 180.0f, 1.0f, 0.5f },
+                                                        80.0f,
+                                                        juce::AudioParameterFloatAttributes().withLabel ("ms")));
+
+    layout.push_back (std::make_unique<FloatParameter> (juce::ParameterID { ParameterIds::scatter, 1 },
+                                                        "Scatter",
+                                                        percentRange(),
+                                                        0.35f,
+                                                        makePercentAttributes ("%")));
+
+    layout.push_back (std::make_unique<FloatParameter> (juce::ParameterID { ParameterIds::spread, 1 },
+                                                        "Spread",
+                                                        percentRange(),
+                                                        0.6f,
+                                                        makePercentAttributes ("%")));
+
+    layout.push_back (std::make_unique<FloatParameter> (juce::ParameterID { ParameterIds::growth, 1 },
+                                                        "Growth",
+                                                        percentRange(),
+                                                        0.5f,
+                                                        makePercentAttributes ("%")));
+
+    layout.push_back (std::make_unique<FloatParameter> (juce::ParameterID { ParameterIds::nutrients, 1 },
+                                                        "Nutrients",
+                                                        percentRange(),
+                                                        0.5f,
+                                                        makePercentAttributes ("%")));
+
+    layout.push_back (std::make_unique<IntParameter> (juce::ParameterID { ParameterIds::seed, 1 },
+                                                      "Seed",
+                                                      0,
+                                                      65535,
+                                                      12345));
+
+    layout.push_back (std::make_unique<FloatParameter> (juce::ParameterID { ParameterIds::conduction, 1 },
+                                                        "Conduction",
+                                                        percentRange(),
+                                                        0.4f,
+                                                        makePercentAttributes ("%")));
+
+    layout.push_back (std::make_unique<FloatParameter> (juce::ParameterID { ParameterIds::damping, 1 },
+                                                        "Damping",
+                                                        percentRange(),
+                                                        0.45f,
+                                                        makePercentAttributes ("%")));
+
+    layout.push_back (std::make_unique<BoolParameter> (juce::ParameterID { ParameterIds::sporeBurst, 1 },
+                                                       "Spore Burst",
+                                                       false));
+
+    layout.push_back (std::make_unique<BoolParameter> (juce::ParameterID { ParameterIds::freeze, 1 },
+                                                       "Freeze",
+                                                       false));
+
+    layout.push_back (std::make_unique<BoolParameter> (juce::ParameterID { ParameterIds::resetClear, 1 },
+                                                       "Reset/Clear",
+                                                       false));
+
+    return { layout.begin(), layout.end() };
 }
 
 //==============================================================================
@@ -167,17 +293,39 @@ juce::AudioProcessorEditor* AudioPluginAudioProcessor::createEditor()
 //==============================================================================
 void AudioPluginAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
-    // You should use this method to store your parameters in the memory block.
-    // You could do that either as raw data, or use the XML or ValueTree classes
-    // as intermediaries to make it easy to save and load complex data.
-    juce::ignoreUnused (destData);
+    auto state = parameters.copyState();
+    state.setProperty (stateVersionProperty, currentStateVersion, nullptr);
+
+    if (auto xml = state.createXml())
+        copyXmlToBinary (*xml, destData);
 }
 
 void AudioPluginAudioProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
-    // You should use this method to restore your parameters from this memory block,
-    // whose contents will have been created by the getStateInformation() call.
-    juce::ignoreUnused (data, sizeInBytes);
+    const std::unique_ptr<juce::XmlElement> xmlState (getXmlFromBinary (data, sizeInBytes));
+
+    if (xmlState == nullptr)
+        return;
+
+    const auto state = juce::ValueTree::fromXml (*xmlState);
+    if (! state.isValid() || ! state.hasType (stateType))
+        return;
+
+    auto restoredState = state;
+    if (! restoredState.hasProperty (stateVersionProperty))
+        restoredState.setProperty (stateVersionProperty, currentStateVersion, nullptr);
+
+    parameters.replaceState (restoredState);
+}
+
+juce::AudioProcessorValueTreeState& AudioPluginAudioProcessor::getValueTreeState() noexcept
+{
+    return parameters;
+}
+
+const juce::AudioProcessorValueTreeState& AudioPluginAudioProcessor::getValueTreeState() const noexcept
+{
+    return parameters;
 }
 
 //==============================================================================

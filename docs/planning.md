@@ -7,8 +7,8 @@ This file is the working implementation plan for `hyphae` v0.1. It replaces the 
 The repository is still at the JUCE template stage.
 
 - `CMakeLists.txt` now uses the Hyphae identity: project `Hyphae`, product name `Hyphae`, manufacturer `Lucian Par`, manufacturer code `LUCP`, plugin code `Hyph`.
-- [`src/PluginProcessor.cpp`](/Users/lucian/projects/hyphae/src/PluginProcessor.cpp:1) is placeholder pass-through/template logic with no DSP, no APVTS, and no state serialization.
-- [`src/PluginEditor.cpp`](/Users/lucian/projects/hyphae/src/PluginEditor.cpp:1) is still the default "Hello World" editor.
+- [`src/PluginProcessor.cpp`](/Users/lucian/projects/hyphae/src/PluginProcessor.cpp:1) now includes an APVTS parameter layout and versioned parameter-state serialization, but DSP is still placeholder/template logic.
+- [`src/PluginEditor.cpp`](/Users/lucian/projects/hyphae/src/PluginEditor.cpp:1) is still a lightweight placeholder editor, but it now reflects the Hyphae identity and M1 state skeleton.
 - `README.md` is still the generic JUCE kickstart readme.
 - `docs/DesignV1.md` is the main design reference right now; the future doc split described below has not been created yet.
 
@@ -114,7 +114,7 @@ Notes:
 
 ### M1. Parameters + State Skeleton
 
-Status: `not started`
+Status: `done`
 
 Goals:
 
@@ -128,6 +128,12 @@ Deliverables:
 - APVTS-backed parameter layout.
 - Versioned state payload.
 - Docs updated with exact ranges/defaults and ID strings.
+
+Notes:
+
+- APVTS root type is `HyphaeState`.
+- Current state payload stores parameter values plus root property `stateVersion = 1`.
+- Full exact sim-state resume is still deferred to M8; M1 covers stable parameter persistence only.
 
 ### M2. Delay Buffer
 
@@ -284,7 +290,7 @@ Deliverables:
 
 If implementation work starts from the current repo state, the next concrete steps should be:
 
-1. Rename the plugin identity in `CMakeLists.txt`.
-2. Add APVTS plus versioned state serialization.
-3. Replace the placeholder processor/editor skeleton with Hyphae-specific classes and naming where needed.
-4. Update `README.md` and `docs/DesignV1.md` as soon as M0 and M1 land so the repo stops presenting itself as the generic template.
+1. Implement the bounded mono delay buffer and interpolated reads for M2.
+2. Add smoothed write gain handling for Freeze ducking.
+3. Replace more of the remaining placeholder processor/editor skeleton with Hyphae-specific behavior and controls.
+4. Update `README.md` once the first audible DSP milestone lands so the repo stops presenting itself as the generic template.
