@@ -22,13 +22,24 @@ Target headroom: ~ −12 dBFS operating level
 Wet normalization scaling: yes (e.g., 1/sqrt(activeVoices))
 UI: minimal in v0.1, “cool UI” in v0.2+
 
+Identity snapshot (M0)
+
+Project / product name: Hyphae
+Company name: Lucian Par
+Manufacturer code: LUCP
+Plugin code: Hyph
+Bundle ID: com.lucianpar.hyphae
+Formats: AU, VST3, Standalone
+Plugin role: audio effect
+Initial bus support confirmation: matched mono-in/mono-out and stereo-in/stereo-out, with stereo effect behavior remaining the primary design target
+
 1. Repo starting point
 
 Repo: https://github.com/lucianpar/hyphae
 
-Current baseline is a JUCE kickstart template:
+Current baseline is a JUCE kickstart template, but M0 has renamed the plugin identity:
 
-CMakeLists.txt still uses template product identity and builds AU/VST3/Standalone.
+CMakeLists.txt now builds the product as Hyphae and targets AU/VST3/Standalone.
 PluginProcessor contains placeholder DSP and placeholder state saving.
 
 Constraint: do not modify JUCE submodule code.

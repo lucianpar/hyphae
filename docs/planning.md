@@ -6,7 +6,7 @@ This file is the working implementation plan for `hyphae` v0.1. It replaces the 
 
 The repository is still at the JUCE template stage.
 
-- `CMakeLists.txt` still uses the template identity: project `KICKSTART`, product name `KICKSTART`, manufacturer `JAFFCO`, manufacturer code `JFCO`, plugin code `Kstr`.
+- `CMakeLists.txt` now uses the Hyphae identity: project `Hyphae`, product name `Hyphae`, manufacturer `Lucian Par`, manufacturer code `LUCP`, plugin code `Hyph`.
 - [`src/PluginProcessor.cpp`](/Users/lucian/projects/hyphae/src/PluginProcessor.cpp:1) is placeholder pass-through/template logic with no DSP, no APVTS, and no state serialization.
 - [`src/PluginEditor.cpp`](/Users/lucian/projects/hyphae/src/PluginEditor.cpp:1) is still the default "Hello World" editor.
 - `README.md` is still the generic JUCE kickstart readme.
@@ -91,7 +91,7 @@ Status keys: `not started`, `in progress`, `done`.
 
 ### M0. Identity + Build Sanity
 
-Status: `not started`
+Status: `done`
 
 Goals:
 
@@ -104,10 +104,13 @@ Deliverables:
 
 - Plugin no longer builds as `KICKSTART`.
 - Design docs record the final product identity and plugin codes.
+- Initial bus support is confirmed as matched mono/stereo layouts in the current processor skeleton.
 
 Notes:
 
 - This is the highest-priority first step because every later host test and state blob depends on stable identity.
+- Chosen identity for M0: project/product `Hyphae`, company `Lucian Par`, manufacturer code `LUCP`, plugin code `Hyph`.
+- Explicit bundle ID: `com.lucianpar.hyphae`.
 
 ### M1. Parameters + State Skeleton
 
