@@ -166,7 +166,7 @@ Notes:
 
 ### M3. Grain Voice Pool + Hann Window
 
-Status: `not started`
+Status: `done`
 
 Goals:
 
@@ -180,6 +180,14 @@ Deliverables:
 
 - Audible spores from delay memory.
 - Docs updated with final grain size and drift bounds.
+
+Notes:
+
+- Current implementation uses a fixed processor-owned pool of `12` grain voices.
+- Grain size range is now locked to `20.0..180.0 ms`.
+- Rate drift range is currently `0.97..1.03`.
+- Scheduling is block-driven and Poisson-ish, with a hard cap of `2` spawns per block.
+- When all voices are active, new spawns are dropped rather than stolen.
 
 ### M4. Mycelium Control Model
 

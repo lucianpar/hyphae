@@ -36,12 +36,15 @@ void AudioPluginAudioProcessorEditor::paint (juce::Graphics& g)
     const auto bufferSamples = processorRef.getDelayBufferCapacitySamples();
     const auto previewSample = processorRef.getLastDelayPreviewSample();
     const auto currentWriteGain = processorRef.getLastWriteGain();
+    const auto activeGrains = processorRef.getActiveGrainCount();
 
     g.drawFittedText ("Parameters: " + juce::String (parameterCount), bounds.removeFromTop (22),
                       juce::Justification::centredLeft, 1);
     g.drawFittedText ("State version: " + stateVersion.toString(), bounds.removeFromTop (22),
                       juce::Justification::centredLeft, 1);
     g.drawFittedText ("Delay buffer: " + juce::String (bufferSamples) + " samples", bounds.removeFromTop (22),
+                      juce::Justification::centredLeft, 1);
+    g.drawFittedText ("Active grains: " + juce::String (activeGrains) + " / 12", bounds.removeFromTop (22),
                       juce::Justification::centredLeft, 1);
     g.drawFittedText ("Freeze write gain: " + juce::String (currentWriteGain, 2), bounds.removeFromTop (22),
                       juce::Justification::centredLeft, 1);

@@ -1,12 +1,19 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 
+#include <algorithm>
 #include <cmath>
 
 namespace
 {
 constexpr auto stateType = "HyphaeState";
 constexpr auto stateVersionProperty = "stateVersion";
+constexpr float minimumSpawnDensity = 0.1f;
+constexpr float minimumGrainDelayMs = 35.0f;
+constexpr float maximumGrainDelayMs = 1200.0f;
+constexpr float minimumRateDrift = 0.97f;
+constexpr float maximumRateDrift = 1.03f;
+constexpr float voiceBaseGain = 0.18f;
 
 namespace ParameterIds
 {
@@ -55,7 +62,16 @@ AudioPluginAudioProcessor::AudioPluginAudioProcessor()
        parameters (*this, nullptr, stateType, createParameterLayout())
 {
     parameters.state.setProperty (stateVersionProperty, currentStateVersion, nullptr);
+    dryWetParameter = parameters.getRawParameterValue (ParameterIds::dryWet);
+    outputTrimDbParameter = parameters.getRawParameterValue (ParameterIds::outputTrimDb);
+    densityParameter = parameters.getRawParameterValue (ParameterIds::density);
+    sizeMsParameter = parameters.getRawParameterValue (ParameterIds::sizeMs);
+    scatterParameter = parameters.getRawParameterValue (ParameterIds::scatter);
+    spreadParameter = parameters.getRawParameterValue (ParameterIds::spread);
+    seedParameter = parameters.getRawParameterValue (ParameterIds::seed);
     freezeParameter = parameters.getRawParameterValue (ParameterIds::freeze);
+    randomGenerator.seed (static_cast<std::minstd_rand::result_type> (lastSeedValue));
+    scheduleNextSpawnInterval();
 }
 
 AudioPluginAudioProcessor::~AudioPluginAudioProcessor()
@@ -279,19 +295,27 @@ void AudioPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPer
     juce::ignoreUnused (sampleRate, samplesPerBlock);
 
     currentSampleRate = juce::jlimit (1.0, maxSupportedSampleRate, sampleRate);
+    preparedBlockSize = juce::jmax (1, samplesPerBlock);
 
     const auto delayCapacitySamples = juce::jlimit (1,
                                                     hardCapDelaySamples,
                                                     static_cast<int> (std::ceil (currentSampleRate * maxDelaySeconds)));
 
     writeGain.reset (currentSampleRate, 0.03);
+    dryWetMix.reset (currentSampleRate, 0.03);
+    outputGain.reset (currentSampleRate, 0.03);
     delayBuffer.prepare (currentSampleRate, delayCapacitySamples);
+    wetBuffer.setSize (2, preparedBlockSize, false, false, true);
     resetDelayState();
+    resetGrainState();
+    reseedRandomIfNeeded();
+    scheduleNextSpawnInterval();
 }
 
 void AudioPluginAudioProcessor::releaseResources()
 {
     resetDelayState();
+    resetGrainState();
 }
 
 bool AudioPluginAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
@@ -340,7 +364,22 @@ void AudioPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     if (numSamples <= 0)
         return;
 
+    if (numSamples > preparedBlockSize || wetBuffer.getNumSamples() < numSamples)
+    {
+        jassertfalse;
+        return;
+    }
+
+    reseedRandomIfNeeded();
+
     writeGain.setTargetValue (getFreezeTargetWriteGain());
+    dryWetMix.setTargetValue (getFloatParameterValue (dryWetParameter, 0.5f));
+
+    const auto outputTrimDb = getFloatParameterValue (outputTrimDbParameter, 0.0f);
+    outputGain.setTargetValue (juce::Decibels::decibelsToGain (outputTrimDb));
+
+    spawnGrainsForBlock (numSamples);
+    wetBuffer.clear();
 
     for (int sampleIndex = 0; sampleIndex < numSamples; ++sampleIndex)
     {
@@ -355,6 +394,29 @@ void AudioPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         const auto smoothedWriteGain = writeGain.getNextValue();
         delayBuffer.write (monoSum * smoothedWriteGain);
         lastWriteGain.store (smoothedWriteGain, std::memory_order_relaxed);
+    }
+
+    renderWetGrains (wetBuffer, numSamples);
+
+    auto* wetLeft = wetBuffer.getWritePointer (0);
+    auto* wetRight = wetBuffer.getWritePointer (1);
+    auto* outputLeft = buffer.getWritePointer (0);
+    auto* outputRight = buffer.getNumChannels() > 1 ? buffer.getWritePointer (1) : nullptr;
+
+    for (int sampleIndex = 0; sampleIndex < numSamples; ++sampleIndex)
+    {
+        const auto dryMix = 1.0f - dryWetMix.getNextValue();
+        const auto wetMix = 1.0f - dryMix;
+        const auto smoothedOutputGain = outputGain.getNextValue();
+
+        const auto dryLeft = sanitizeSample (outputLeft[sampleIndex]);
+        const auto dryRight = outputRight != nullptr ? sanitizeSample (outputRight[sampleIndex]) : dryLeft;
+        const auto mixedLeft = ((dryLeft * dryMix) + (wetLeft[sampleIndex] * wetMix)) * smoothedOutputGain;
+        const auto mixedRight = ((dryRight * dryMix) + (wetRight[sampleIndex] * wetMix)) * smoothedOutputGain;
+
+        outputLeft[sampleIndex] = sanitizeSample (mixedLeft);
+        if (outputRight != nullptr)
+            outputRight[sampleIndex] = sanitizeSample (mixedRight);
     }
 
     if (const auto capacitySamples = delayBuffer.getCapacitySamples(); capacitySamples > 1)
@@ -434,6 +496,11 @@ int AudioPluginAudioProcessor::getDelayBufferCapacitySamples() const noexcept
     return delayBuffer.getCapacitySamples();
 }
 
+int AudioPluginAudioProcessor::getActiveGrainCount() const noexcept
+{
+    return lastActiveGrainCount.load (std::memory_order_relaxed);
+}
+
 void AudioPluginAudioProcessor::resetDelayState() noexcept
 {
     delayBuffer.clear();
@@ -442,12 +509,155 @@ void AudioPluginAudioProcessor::resetDelayState() noexcept
     lastDelayPreviewSample.store (0.0f, std::memory_order_relaxed);
 }
 
+void AudioPluginAudioProcessor::resetGrainState() noexcept
+{
+    for (auto& voice : grainVoices)
+        voice = {};
+
+    dryWetMix.setCurrentAndTargetValue (getFloatParameterValue (dryWetParameter, 0.5f));
+    outputGain.setCurrentAndTargetValue (juce::Decibels::decibelsToGain (getFloatParameterValue (outputTrimDbParameter, 0.0f)));
+    samplesUntilNextSpawn = 0.0;
+    lastActiveGrainCount.store (0, std::memory_order_relaxed);
+}
+
 float AudioPluginAudioProcessor::getFreezeTargetWriteGain() const noexcept
 {
     if (freezeParameter == nullptr)
         return 1.0f;
 
     return *freezeParameter >= 0.5f ? 0.0f : 1.0f;
+}
+
+float AudioPluginAudioProcessor::getFloatParameterValue (std::atomic<float>* parameter, float fallbackValue) const noexcept
+{
+    return parameter != nullptr ? parameter->load (std::memory_order_relaxed) : fallbackValue;
+}
+
+void AudioPluginAudioProcessor::reseedRandomIfNeeded() noexcept
+{
+    const auto requestedSeed = static_cast<int> (getFloatParameterValue (seedParameter, static_cast<float> (lastSeedValue)));
+    if (requestedSeed == lastSeedValue)
+        return;
+
+    lastSeedValue = requestedSeed;
+    randomGenerator.seed (static_cast<std::minstd_rand::result_type> (juce::jmax (0, requestedSeed)));
+    scheduleNextSpawnInterval();
+}
+
+float AudioPluginAudioProcessor::nextRandomFloat() noexcept
+{
+    return static_cast<float> (randomGenerator()) / static_cast<float> (std::minstd_rand::max());
+}
+
+float AudioPluginAudioProcessor::nextRandomBipolar() noexcept
+{
+    return (nextRandomFloat() * 2.0f) - 1.0f;
+}
+
+int AudioPluginAudioProcessor::getActiveGrainCountInternal() const noexcept
+{
+    return static_cast<int> (std::count_if (grainVoices.begin(), grainVoices.end(),
+                                            [] (const GrainVoice& voice) { return voice.active; }));
+}
+
+void AudioPluginAudioProcessor::scheduleNextSpawnInterval() noexcept
+{
+    const auto density = juce::jmax (minimumSpawnDensity, getFloatParameterValue (densityParameter, 4.0f));
+    const auto randomValue = juce::jmax (0.0001f, nextRandomFloat());
+    const auto intervalSeconds = -std::log (randomValue) / density;
+    samplesUntilNextSpawn = juce::jmax (1.0, intervalSeconds * currentSampleRate);
+}
+
+void AudioPluginAudioProcessor::spawnGrainsForBlock (int numSamples) noexcept
+{
+    samplesUntilNextSpawn -= static_cast<double> (numSamples);
+
+    auto spawnedThisBlock = 0;
+    while (samplesUntilNextSpawn <= 0.0 && spawnedThisBlock < 2)
+    {
+        if (spawnGrainVoice())
+            ++spawnedThisBlock;
+
+        scheduleNextSpawnInterval();
+    }
+
+    if (samplesUntilNextSpawn <= 0.0)
+        samplesUntilNextSpawn = 1.0;
+}
+
+bool AudioPluginAudioProcessor::spawnGrainVoice() noexcept
+{
+    auto freeVoice = std::find_if (grainVoices.begin(), grainVoices.end(),
+                                   [] (const GrainVoice& voice) { return ! voice.active; });
+
+    if (freeVoice == grainVoices.end())
+        return false;
+
+    const auto sizeMs = juce::jlimit (20.0f, 180.0f, getFloatParameterValue (sizeMsParameter, 80.0f));
+    const auto durationSamples = juce::jmax (8, static_cast<int> (std::round ((sizeMs * 0.001f) * static_cast<float> (currentSampleRate))));
+    const auto scatter = juce::jlimit (0.0f, 1.0f, getFloatParameterValue (scatterParameter, 0.35f));
+    const auto spread = juce::jlimit (0.0f, 1.0f, getFloatParameterValue (spreadParameter, 0.6f));
+    const auto delayMs = juce::jlimit (minimumGrainDelayMs,
+                                       maximumGrainDelayMs,
+                                       120.0f + (scatter * 680.0f) + (nextRandomFloat() * 320.0f));
+
+    const auto pan = juce::jlimit (-1.0f, 1.0f, nextRandomBipolar() * spread);
+    const auto angle = (pan + 1.0f) * 0.25f * juce::MathConstants<float>::pi;
+    const auto drift = juce::jmap (nextRandomFloat(), minimumRateDrift, maximumRateDrift);
+
+    freeVoice->active = true;
+    freeVoice->delaySamples = delayMs * 0.001f * static_cast<float> (currentSampleRate);
+    freeVoice->readOffsetSamples = 0.0f;
+    freeVoice->readIncrement = drift;
+    freeVoice->gain = voiceBaseGain * juce::jmap (scatter, 1.0f, 0.75f);
+    freeVoice->leftGain = std::cos (angle);
+    freeVoice->rightGain = std::sin (angle);
+    freeVoice->samplesRemaining = durationSamples;
+    freeVoice->totalSamples = durationSamples;
+
+    return true;
+}
+
+void AudioPluginAudioProcessor::renderWetGrains (juce::AudioBuffer<float>& destinationBuffer, int numSamples) noexcept
+{
+    auto* wetLeft = destinationBuffer.getWritePointer (0);
+    auto* wetRight = destinationBuffer.getWritePointer (1);
+
+    for (auto& voice : grainVoices)
+    {
+        if (! voice.active)
+            continue;
+
+        for (int sampleIndex = 0; sampleIndex < numSamples; ++sampleIndex)
+        {
+            if (! voice.active || voice.samplesRemaining <= 0)
+            {
+                voice = {};
+                break;
+            }
+
+            const auto progress = 1.0f - (static_cast<float> (voice.samplesRemaining) / static_cast<float> (voice.totalSamples));
+            const auto window = 0.5f - (0.5f * std::cos (juce::MathConstants<float>::twoPi * progress));
+            const auto sourceSample = delayBuffer.readDelaySamples (voice.delaySamples + voice.readOffsetSamples);
+            const auto sample = sanitizeSample (sourceSample * window * voice.gain);
+
+            wetLeft[sampleIndex] = sanitizeSample (wetLeft[sampleIndex] + (sample * voice.leftGain));
+            wetRight[sampleIndex] = sanitizeSample (wetRight[sampleIndex] + (sample * voice.rightGain));
+
+            voice.readOffsetSamples += voice.readIncrement;
+            --voice.samplesRemaining;
+        }
+    }
+
+    const auto activeVoiceCount = getActiveGrainCountInternal();
+    lastActiveGrainCount.store (activeVoiceCount, std::memory_order_relaxed);
+
+    const auto normalization = 1.0f / std::sqrt (static_cast<float> (juce::jmax (1, activeVoiceCount)));
+    for (int sampleIndex = 0; sampleIndex < numSamples; ++sampleIndex)
+    {
+        wetLeft[sampleIndex] = sanitizeSample (wetLeft[sampleIndex] * normalization);
+        wetRight[sampleIndex] = sanitizeSample (wetRight[sampleIndex] * normalization);
+    }
 }
 
 //==============================================================================

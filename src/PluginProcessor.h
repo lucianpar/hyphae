@@ -1,6 +1,8 @@
 #pragma once
 
+#include <array>
 #include <atomic>
+#include <random>
 #include <vector>
 
 #include <juce_audio_processors/juce_audio_processors.h>
@@ -57,8 +59,11 @@ public:
     float getLastDelayPreviewSample() const noexcept;
     float getLastWriteGain() const noexcept;
     int getDelayBufferCapacitySamples() const noexcept;
+    int getActiveGrainCount() const noexcept;
 
 private:
+    static constexpr int maxGrainVoices = 12;
+
     class DelayBuffer
     {
     public:
@@ -74,16 +79,55 @@ private:
         int validSampleCount = 0;
     };
 
+    struct GrainVoice
+    {
+        bool active = false;
+        float delaySamples = 0.0f;
+        float readOffsetSamples = 0.0f;
+        float readIncrement = 1.0f;
+        float gain = 0.0f;
+        float leftGain = 0.0f;
+        float rightGain = 0.0f;
+        int samplesRemaining = 0;
+        int totalSamples = 0;
+    };
+
     void resetDelayState() noexcept;
+    void resetGrainState() noexcept;
     float getFreezeTargetWriteGain() const noexcept;
+    float getFloatParameterValue (std::atomic<float>* parameter, float fallbackValue) const noexcept;
+    void reseedRandomIfNeeded() noexcept;
+    float nextRandomFloat() noexcept;
+    float nextRandomBipolar() noexcept;
+    int getActiveGrainCountInternal() const noexcept;
+    void scheduleNextSpawnInterval() noexcept;
+    void spawnGrainsForBlock (int numSamples) noexcept;
+    bool spawnGrainVoice() noexcept;
+    void renderWetGrains (juce::AudioBuffer<float>& wetBuffer, int numSamples) noexcept;
 
     juce::AudioProcessorValueTreeState parameters;
+    std::atomic<float>* dryWetParameter = nullptr;
+    std::atomic<float>* outputTrimDbParameter = nullptr;
+    std::atomic<float>* densityParameter = nullptr;
+    std::atomic<float>* sizeMsParameter = nullptr;
+    std::atomic<float>* scatterParameter = nullptr;
+    std::atomic<float>* spreadParameter = nullptr;
+    std::atomic<float>* seedParameter = nullptr;
     std::atomic<float>* freezeParameter = nullptr;
     DelayBuffer delayBuffer;
+    std::array<GrainVoice, maxGrainVoices> grainVoices {};
+    juce::AudioBuffer<float> wetBuffer;
     juce::LinearSmoothedValue<float> writeGain;
+    juce::LinearSmoothedValue<float> dryWetMix;
+    juce::LinearSmoothedValue<float> outputGain;
+    std::minstd_rand randomGenerator;
+    double samplesUntilNextSpawn = 0.0;
     double currentSampleRate = 44100.0;
+    int preparedBlockSize = 0;
+    int lastSeedValue = 12345;
     std::atomic<float> lastDelayPreviewSample { 0.0f };
     std::atomic<float> lastWriteGain { 1.0f };
+    std::atomic<int> lastActiveGrainCount { 0 };
 
     //==============================================================================
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudioPluginAudioProcessor)

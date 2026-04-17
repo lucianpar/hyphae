@@ -130,14 +130,26 @@ Voices: fixed pool of 12 concurrent grains.
 
 Each grain voice stores:
 
-active
-delayStartSamples (float)
-durationSamples (int)
-phase (0..1)
-rate (subtle drift around 1.0; locked range v0.1)
+active flag
+fixed delaySamples read anchor
+readOffsetSamples accumulator
+durationSamples / samplesRemaining
+readIncrement rate drift
 gain
-pan (−1..+1)
-optional: per-grain filter tilt (very light) if needed
+stereo left/right gains derived from pan
+
+M3 implementation snapshot
+
+Voice pool: fixed array of `12` voices, allocated with the processor
+Grain size range: `20.0..180.0 ms` locked for the current v0.1 implementation
+Rate drift range: `0.97..1.03`
+Per-block spawn cap: `2`
+Full-pool behavior: drop spawns, no stealing
+Scheduler: block-driven exponential inter-arrival timing using the Density parameter as grains/sec
+Current delay targeting: approximately `120..1120 ms` with Scatter widening the reach
+Current wet normalization: `1 / sqrt(max (1, activeVoices))`
+Current stereo placement: equal-power random pan scaled by Spread
+Current dry/wet and output trim handling: both smoothed with `30 ms` ramps
 
 Windowing
 
@@ -251,7 +263,7 @@ Note: this is the control range only; later DSP stages still enforce spawn-budge
 `sizeMs`
 Display name: Size
 Range/default: `20.0..180.0 ms`, default `80.0 ms`
-Note: this is the provisional v0.1 locked range from M1 and may be tightened once the grain engine is tuned
+Note: this is now the current locked v0.1 grain-size range after M3
 
 `scatter`
 Display name: Scatter
