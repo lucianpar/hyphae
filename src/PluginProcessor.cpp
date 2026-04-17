@@ -14,6 +14,9 @@ constexpr float maximumGrainDelayMs = 1200.0f;
 constexpr float minimumRateDrift = 0.97f;
 constexpr float maximumRateDrift = 1.03f;
 constexpr float voiceBaseGain = 0.18f;
+constexpr float clusterSmoothingPerSecond = 6.0f;
+constexpr float minimumClusterEnergy = 0.2f;
+constexpr float maximumClusterEnergy = 1.0f;
 
 namespace ParameterIds
 {
@@ -68,9 +71,13 @@ AudioPluginAudioProcessor::AudioPluginAudioProcessor()
     sizeMsParameter = parameters.getRawParameterValue (ParameterIds::sizeMs);
     scatterParameter = parameters.getRawParameterValue (ParameterIds::scatter);
     spreadParameter = parameters.getRawParameterValue (ParameterIds::spread);
+    growthParameter = parameters.getRawParameterValue (ParameterIds::growth);
+    nutrientsParameter = parameters.getRawParameterValue (ParameterIds::nutrients);
     seedParameter = parameters.getRawParameterValue (ParameterIds::seed);
+    sporeBurstParameter = parameters.getRawParameterValue (ParameterIds::sporeBurst);
     freezeParameter = parameters.getRawParameterValue (ParameterIds::freeze);
     randomGenerator.seed (static_cast<std::minstd_rand::result_type> (lastSeedValue));
+    initializeClusters (true);
     scheduleNextSpawnInterval();
 }
 
@@ -308,6 +315,7 @@ void AudioPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPer
     wetBuffer.setSize (2, preparedBlockSize, false, false, true);
     resetDelayState();
     resetGrainState();
+    resetMyceliumState();
     reseedRandomIfNeeded();
     scheduleNextSpawnInterval();
 }
@@ -316,6 +324,7 @@ void AudioPluginAudioProcessor::releaseResources()
 {
     resetDelayState();
     resetGrainState();
+    resetMyceliumState();
 }
 
 bool AudioPluginAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
@@ -371,6 +380,8 @@ void AudioPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     }
 
     reseedRandomIfNeeded();
+    handleSporeBurstTrigger();
+    updateMyceliumModel (numSamples);
 
     writeGain.setTargetValue (getFreezeTargetWriteGain());
     dryWetMix.setTargetValue (getFloatParameterValue (dryWetParameter, 0.5f));
@@ -520,6 +531,13 @@ void AudioPluginAudioProcessor::resetGrainState() noexcept
     lastActiveGrainCount.store (0, std::memory_order_relaxed);
 }
 
+void AudioPluginAudioProcessor::resetMyceliumState() noexcept
+{
+    myceliumEventTimerSamples = 0.0;
+    lastSporeBurstState = false;
+    initializeClusters (true);
+}
+
 float AudioPluginAudioProcessor::getFreezeTargetWriteGain() const noexcept
 {
     if (freezeParameter == nullptr)
@@ -541,6 +559,7 @@ void AudioPluginAudioProcessor::reseedRandomIfNeeded() noexcept
 
     lastSeedValue = requestedSeed;
     randomGenerator.seed (static_cast<std::minstd_rand::result_type> (juce::jmax (0, requestedSeed)));
+    initializeClusters (true);
     scheduleNextSpawnInterval();
 }
 
@@ -597,11 +616,15 @@ bool AudioPluginAudioProcessor::spawnGrainVoice() noexcept
     const auto durationSamples = juce::jmax (8, static_cast<int> (std::round ((sizeMs * 0.001f) * static_cast<float> (currentSampleRate))));
     const auto scatter = juce::jlimit (0.0f, 1.0f, getFloatParameterValue (scatterParameter, 0.35f));
     const auto spread = juce::jlimit (0.0f, 1.0f, getFloatParameterValue (spreadParameter, 0.6f));
+    const auto clusterIndex = chooseClusterIndex();
+    const auto& cluster = clusters[static_cast<size_t> (clusterIndex)];
+    const auto clusterDelaySpread = cluster.currentDelaySpreadMs + (scatter * 220.0f);
     const auto delayMs = juce::jlimit (minimumGrainDelayMs,
                                        maximumGrainDelayMs,
-                                       120.0f + (scatter * 680.0f) + (nextRandomFloat() * 320.0f));
+                                       cluster.currentDelayMs + (nextRandomBipolar() * clusterDelaySpread));
 
-    const auto pan = juce::jlimit (-1.0f, 1.0f, nextRandomBipolar() * spread);
+    const auto clusterPanSpread = juce::jlimit (0.02f, 1.0f, cluster.currentPanSpread + (scatter * 0.18f));
+    const auto pan = juce::jlimit (-1.0f, 1.0f, cluster.currentPanCenter + (nextRandomBipolar() * clusterPanSpread * spread));
     const auto angle = (pan + 1.0f) * 0.25f * juce::MathConstants<float>::pi;
     const auto drift = juce::jmap (nextRandomFloat(), minimumRateDrift, maximumRateDrift);
 
@@ -609,7 +632,7 @@ bool AudioPluginAudioProcessor::spawnGrainVoice() noexcept
     freeVoice->delaySamples = delayMs * 0.001f * static_cast<float> (currentSampleRate);
     freeVoice->readOffsetSamples = 0.0f;
     freeVoice->readIncrement = drift;
-    freeVoice->gain = voiceBaseGain * juce::jmap (scatter, 1.0f, 0.75f);
+    freeVoice->gain = voiceBaseGain * juce::jmap (scatter, 1.0f, 0.75f) * juce::jmap (cluster.currentEnergy, 0.85f, 1.2f);
     freeVoice->leftGain = std::cos (angle);
     freeVoice->rightGain = std::sin (angle);
     freeVoice->samplesRemaining = durationSamples;
@@ -658,6 +681,219 @@ void AudioPluginAudioProcessor::renderWetGrains (juce::AudioBuffer<float>& desti
         wetLeft[sampleIndex] = sanitizeSample (wetLeft[sampleIndex] * normalization);
         wetRight[sampleIndex] = sanitizeSample (wetRight[sampleIndex] * normalization);
     }
+}
+
+void AudioPluginAudioProcessor::updateMyceliumModel (int numSamples) noexcept
+{
+    const auto deltaSeconds = static_cast<float> (numSamples / currentSampleRate);
+    const auto spread = juce::jlimit (0.0f, 1.0f, getFloatParameterValue (spreadParameter, 0.6f));
+    const auto growth = juce::jlimit (0.0f, 1.0f, getFloatParameterValue (growthParameter, 0.5f));
+    const auto nutrients = juce::jlimit (0.0f, 1.0f, getFloatParameterValue (nutrientsParameter, 0.5f));
+    const auto scatter = juce::jlimit (0.0f, 1.0f, getFloatParameterValue (scatterParameter, 0.35f));
+    const auto smoothing = juce::jlimit (0.0f, 1.0f, deltaSeconds * clusterSmoothingPerSecond);
+
+    myceliumEventTimerSamples -= static_cast<double> (numSamples);
+    if (myceliumEventTimerSamples <= 0.0)
+    {
+        const auto eventIntervalSeconds = juce::jmap (growth, 1.8f, 0.35f);
+        myceliumEventTimerSamples = eventIntervalSeconds * currentSampleRate;
+
+        const auto branchChance = 0.2f + (growth * 0.55f);
+        const auto mergeChance = 0.12f + ((1.0f - nutrients) * 0.45f);
+
+        if (nextRandomFloat() < branchChance && getActiveClusterCount() < maxClusters)
+            branchCluster();
+        else if (nextRandomFloat() < mergeChance && getActiveClusterCount() > 2)
+            mergeClusters();
+        else
+            reseedClusterTargets();
+    }
+
+    targetClusterCount = juce::jlimit (2, maxClusters, 2 + static_cast<int> (std::round (growth * 2.0f)));
+
+    for (auto& cluster : clusters)
+    {
+        if (! cluster.active)
+            continue;
+
+        cluster.ageSeconds += deltaSeconds;
+        cluster.targetPanSpread = juce::jlimit (0.06f, 0.95f, 0.12f + (spread * 0.35f) + (scatter * 0.18f));
+        cluster.targetDelaySpreadMs = juce::jlimit (25.0f, 360.0f, 55.0f + (scatter * 180.0f) + (spread * 45.0f));
+        cluster.targetEnergy = juce::jlimit (minimumClusterEnergy,
+                                             maximumClusterEnergy,
+                                             0.35f + (nutrients * 0.45f) + (nextRandomBipolar() * 0.08f));
+
+        cluster.targetPanCenter = juce::jlimit (-1.0f, 1.0f, cluster.targetPanCenter + (cluster.driftVelocity * deltaSeconds));
+        cluster.targetDelayMs = juce::jlimit (minimumGrainDelayMs,
+                                              maximumGrainDelayMs,
+                                              cluster.targetDelayMs + (nextRandomBipolar() * (18.0f + (growth * 22.0f))));
+
+        cluster.currentPanCenter += (cluster.targetPanCenter - cluster.currentPanCenter) * smoothing;
+        cluster.currentPanSpread += (cluster.targetPanSpread - cluster.currentPanSpread) * smoothing;
+        cluster.currentDelayMs += (cluster.targetDelayMs - cluster.currentDelayMs) * smoothing;
+        cluster.currentDelaySpreadMs += (cluster.targetDelaySpreadMs - cluster.currentDelaySpreadMs) * smoothing;
+        cluster.currentEnergy += (cluster.targetEnergy - cluster.currentEnergy) * smoothing;
+    }
+}
+
+void AudioPluginAudioProcessor::initializeClusters (bool randomizeCurrentState) noexcept
+{
+    targetClusterCount = 3;
+
+    for (int index = 0; index < maxClusters; ++index)
+    {
+        auto& cluster = clusters[static_cast<size_t> (index)];
+        cluster = {};
+        cluster.active = index < targetClusterCount;
+        cluster.targetPanCenter = juce::jlimit (-1.0f, 1.0f, nextRandomBipolar() * 0.8f);
+        cluster.targetPanSpread = 0.14f + (nextRandomFloat() * 0.18f);
+        cluster.targetDelayMs = 150.0f + (nextRandomFloat() * 500.0f);
+        cluster.targetDelaySpreadMs = 55.0f + (nextRandomFloat() * 120.0f);
+        cluster.targetEnergy = 0.45f + (nextRandomFloat() * 0.4f);
+        cluster.driftVelocity = nextRandomBipolar() * 0.32f;
+        cluster.ageSeconds = nextRandomFloat() * 3.0f;
+
+        if (randomizeCurrentState)
+        {
+            cluster.currentPanCenter = cluster.targetPanCenter;
+            cluster.currentPanSpread = cluster.targetPanSpread;
+            cluster.currentDelayMs = cluster.targetDelayMs;
+            cluster.currentDelaySpreadMs = cluster.targetDelaySpreadMs;
+            cluster.currentEnergy = cluster.targetEnergy;
+        }
+        else
+        {
+            cluster.currentPanCenter += (cluster.targetPanCenter - cluster.currentPanCenter) * 0.35f;
+            cluster.currentPanSpread += (cluster.targetPanSpread - cluster.currentPanSpread) * 0.35f;
+            cluster.currentDelayMs += (cluster.targetDelayMs - cluster.currentDelayMs) * 0.35f;
+            cluster.currentDelaySpreadMs += (cluster.targetDelaySpreadMs - cluster.currentDelaySpreadMs) * 0.35f;
+            cluster.currentEnergy += (cluster.targetEnergy - cluster.currentEnergy) * 0.35f;
+        }
+    }
+}
+
+void AudioPluginAudioProcessor::handleSporeBurstTrigger() noexcept
+{
+    const auto sporeBurstState = getFloatParameterValue (sporeBurstParameter, 0.0f) >= 0.5f;
+    const auto risingEdge = sporeBurstState && ! lastSporeBurstState;
+    lastSporeBurstState = sporeBurstState;
+
+    if (! risingEdge)
+        return;
+
+    reseedClusterTargets();
+}
+
+void AudioPluginAudioProcessor::reseedClusterTargets() noexcept
+{
+    const auto growth = juce::jlimit (0.0f, 1.0f, getFloatParameterValue (growthParameter, 0.5f));
+    targetClusterCount = juce::jlimit (2, maxClusters, 2 + static_cast<int> (std::round (growth * 2.0f)));
+
+    for (int index = 0; index < maxClusters; ++index)
+    {
+        auto& cluster = clusters[static_cast<size_t> (index)];
+        cluster.active = index < targetClusterCount;
+        cluster.targetPanCenter = juce::jlimit (-1.0f, 1.0f, nextRandomBipolar() * 0.92f);
+        cluster.targetPanSpread = 0.08f + (nextRandomFloat() * 0.32f);
+        cluster.targetDelayMs = 110.0f + (nextRandomFloat() * 760.0f);
+        cluster.targetDelaySpreadMs = 40.0f + (nextRandomFloat() * 180.0f);
+        cluster.targetEnergy = 0.35f + (nextRandomFloat() * 0.55f);
+        cluster.driftVelocity = nextRandomBipolar() * 0.48f;
+        cluster.ageSeconds = 0.0f;
+
+        if (! cluster.active)
+            cluster.currentEnergy *= 0.7f;
+    }
+}
+
+int AudioPluginAudioProcessor::getActiveClusterCount() const noexcept
+{
+    return static_cast<int> (std::count_if (clusters.begin(), clusters.end(),
+                                            [] (const ClusterState& cluster) { return cluster.active; }));
+}
+
+int AudioPluginAudioProcessor::chooseClusterIndex() noexcept
+{
+    const auto activeClusterCount = getActiveClusterCount();
+    if (activeClusterCount <= 0)
+        return 0;
+
+    float totalEnergy = 0.0f;
+    for (const auto& cluster : clusters)
+        if (cluster.active)
+            totalEnergy += juce::jmax (0.01f, cluster.currentEnergy);
+
+    auto selection = nextRandomFloat() * totalEnergy;
+    for (int index = 0; index < maxClusters; ++index)
+    {
+        const auto& cluster = clusters[static_cast<size_t> (index)];
+        if (! cluster.active)
+            continue;
+
+        selection -= juce::jmax (0.01f, cluster.currentEnergy);
+        if (selection <= 0.0f)
+            return index;
+    }
+
+    for (int index = 0; index < maxClusters; ++index)
+        if (clusters[static_cast<size_t> (index)].active)
+            return index;
+
+    return 0;
+}
+
+void AudioPluginAudioProcessor::branchCluster() noexcept
+{
+    auto sourceIndex = chooseClusterIndex();
+    auto freeIt = std::find_if (clusters.begin(), clusters.end(),
+                                [] (const ClusterState& cluster) { return ! cluster.active; });
+
+    if (freeIt == clusters.end())
+        return;
+
+    const auto& source = clusters[static_cast<size_t> (sourceIndex)];
+    auto& newCluster = *freeIt;
+    newCluster = source;
+    newCluster.active = true;
+    newCluster.targetPanCenter = juce::jlimit (-1.0f, 1.0f, source.targetPanCenter + (nextRandomBipolar() * 0.35f));
+    newCluster.targetDelayMs = juce::jlimit (minimumGrainDelayMs, maximumGrainDelayMs, source.targetDelayMs + (nextRandomBipolar() * 140.0f));
+    newCluster.targetEnergy = juce::jlimit (minimumClusterEnergy, maximumClusterEnergy, source.targetEnergy * 0.82f);
+    newCluster.driftVelocity = nextRandomBipolar() * 0.44f;
+    newCluster.ageSeconds = 0.0f;
+}
+
+void AudioPluginAudioProcessor::mergeClusters() noexcept
+{
+    int firstIndex = -1;
+    int secondIndex = -1;
+
+    for (int index = 0; index < maxClusters; ++index)
+    {
+        if (! clusters[static_cast<size_t> (index)].active)
+            continue;
+
+        if (firstIndex < 0)
+            firstIndex = index;
+        else
+        {
+            secondIndex = index;
+            break;
+        }
+    }
+
+    if (firstIndex < 0 || secondIndex < 0)
+        return;
+
+    auto& a = clusters[static_cast<size_t> (firstIndex)];
+    auto& b = clusters[static_cast<size_t> (secondIndex)];
+    a.targetPanCenter = 0.5f * (a.targetPanCenter + b.targetPanCenter);
+    a.targetDelayMs = 0.5f * (a.targetDelayMs + b.targetDelayMs);
+    a.targetPanSpread = juce::jmax (a.targetPanSpread, b.targetPanSpread) * 0.85f;
+    a.targetDelaySpreadMs = juce::jmax (a.targetDelaySpreadMs, b.targetDelaySpreadMs) * 0.85f;
+    a.targetEnergy = juce::jlimit (minimumClusterEnergy, maximumClusterEnergy, a.targetEnergy + (b.targetEnergy * 0.45f));
+    b.active = false;
+    b.targetEnergy = 0.0f;
+    b.currentEnergy *= 0.5f;
 }
 
 //==============================================================================

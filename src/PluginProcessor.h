@@ -63,6 +63,7 @@ public:
 
 private:
     static constexpr int maxGrainVoices = 12;
+    static constexpr int maxClusters = 4;
 
     class DelayBuffer
     {
@@ -92,8 +93,26 @@ private:
         int totalSamples = 0;
     };
 
+    struct ClusterState
+    {
+        bool active = false;
+        float currentPanCenter = 0.0f;
+        float targetPanCenter = 0.0f;
+        float currentPanSpread = 0.2f;
+        float targetPanSpread = 0.2f;
+        float currentDelayMs = 220.0f;
+        float targetDelayMs = 220.0f;
+        float currentDelaySpreadMs = 80.0f;
+        float targetDelaySpreadMs = 80.0f;
+        float currentEnergy = 0.5f;
+        float targetEnergy = 0.5f;
+        float driftVelocity = 0.0f;
+        float ageSeconds = 0.0f;
+    };
+
     void resetDelayState() noexcept;
     void resetGrainState() noexcept;
+    void resetMyceliumState() noexcept;
     float getFreezeTargetWriteGain() const noexcept;
     float getFloatParameterValue (std::atomic<float>* parameter, float fallbackValue) const noexcept;
     void reseedRandomIfNeeded() noexcept;
@@ -104,6 +123,14 @@ private:
     void spawnGrainsForBlock (int numSamples) noexcept;
     bool spawnGrainVoice() noexcept;
     void renderWetGrains (juce::AudioBuffer<float>& wetBuffer, int numSamples) noexcept;
+    void updateMyceliumModel (int numSamples) noexcept;
+    void initializeClusters (bool randomizeCurrentState) noexcept;
+    void handleSporeBurstTrigger() noexcept;
+    void reseedClusterTargets() noexcept;
+    int getActiveClusterCount() const noexcept;
+    int chooseClusterIndex() noexcept;
+    void branchCluster() noexcept;
+    void mergeClusters() noexcept;
 
     juce::AudioProcessorValueTreeState parameters;
     std::atomic<float>* dryWetParameter = nullptr;
@@ -112,10 +139,14 @@ private:
     std::atomic<float>* sizeMsParameter = nullptr;
     std::atomic<float>* scatterParameter = nullptr;
     std::atomic<float>* spreadParameter = nullptr;
+    std::atomic<float>* growthParameter = nullptr;
+    std::atomic<float>* nutrientsParameter = nullptr;
     std::atomic<float>* seedParameter = nullptr;
+    std::atomic<float>* sporeBurstParameter = nullptr;
     std::atomic<float>* freezeParameter = nullptr;
     DelayBuffer delayBuffer;
     std::array<GrainVoice, maxGrainVoices> grainVoices {};
+    std::array<ClusterState, maxClusters> clusters {};
     juce::AudioBuffer<float> wetBuffer;
     juce::LinearSmoothedValue<float> writeGain;
     juce::LinearSmoothedValue<float> dryWetMix;
@@ -123,8 +154,11 @@ private:
     std::minstd_rand randomGenerator;
     double samplesUntilNextSpawn = 0.0;
     double currentSampleRate = 44100.0;
+    double myceliumEventTimerSamples = 0.0;
     int preparedBlockSize = 0;
     int lastSeedValue = 12345;
+    int targetClusterCount = 3;
+    bool lastSporeBurstState = false;
     std::atomic<float> lastDelayPreviewSample { 0.0f };
     std::atomic<float> lastWriteGain { 1.0f };
     std::atomic<int> lastActiveGrainCount { 0 };

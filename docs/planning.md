@@ -191,7 +191,7 @@ Notes:
 
 ### M4. Mycelium Control Model
 
-Status: `not started`
+Status: `done`
 
 Goals:
 
@@ -203,6 +203,13 @@ Deliverables:
 
 - Cluster count and branch/merge rules written down.
 - Smooth topology reconfiguration behavior.
+
+Notes:
+
+- Current implementation uses a compact `2..4` cluster model with per-cluster pan center, pan spread, delay center, delay spread, energy, drift velocity, and age.
+- Growth currently drives target cluster count and mycelium event cadence.
+- Nutrients currently biases cluster energy and merge tendency.
+- Spore Burst now reseeds cluster targets on a rising edge without altering density or scheduler state.
 
 ### M5. Conduction Bed
 

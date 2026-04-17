@@ -201,6 +201,30 @@ Apply to wet spore sum (and optionally to bed) so “soft storm” increases act
 Use a small number of cluster centers instead of simulating a large graph.
 This hits the “fungal” feel with minimal CPU and direct creative control.
 
+M4 implementation snapshot
+
+Cluster count `K`: dynamic target of `2..4`, currently driven by Growth
+Stored per cluster: current/target pan center, pan spread, delay center, delay spread, energy, drift velocity, age
+Smoothing policy: current values chase target values each block with a smooth control-rate blend rather than hard jumps
+Cluster selection for spawn: weighted by current cluster energy
+
+Current branch/merge rules
+
+Branch:
+when the periodic mycelium event fires and active clusters are below `4`, a new cluster copies a source cluster and offsets its target pan/delay/energy
+
+Merge:
+when the periodic mycelium event fires and more than `2` clusters are active, two active clusters can collapse toward a shared target and one cluster deactivates
+
+Current event cadence:
+periodic event timer ranges from roughly `1.8 s` down to `0.35 s` as Growth increases
+
+Current parameter influence:
+Growth sets target cluster count and speeds up branch/merge/reseed events
+Nutrients biases target cluster energy and merge likelihood
+Spread widens target pan spreads
+Scatter widens per-grain deviation around cluster targets
+
 State includes:
 
 K clusters (recommend 2–4 for v0.1)
@@ -235,6 +259,12 @@ does not spike density
 reconfiguration must be click-free:
 either smooth cluster center transitions over ~50–200 ms
 and/or apply a short density multiplier ramp down/up without a “gust” peak
+
+Current M4 implementation:
+
+Spore Burst is handled as a rising-edge topology reseed trigger
+it reseeds cluster targets and drift velocities, but does not modify Density or scheduler state
+click-free behavior is achieved by smoothly interpolating current cluster values toward the new targets rather than forcing abrupt jumps
 6. Parameters
 6.1 v0.1 parameter set
 
